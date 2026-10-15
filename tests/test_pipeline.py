@@ -79,6 +79,11 @@ async def test_pipeline_deduplicates_filters_sorts_caps_and_records_run(database
 
     assert result.empty is False
     assert result.shown_listing_ids == ("7", "1", "2", "4", "5")
+    with database.connect() as connection:
+        duplicate = connection.execute(
+            "SELECT title FROM listings WHERE listing_id = '2'"
+        ).fetchone()
+    assert duplicate["title"] == "Duplicate"
     assert "source errors: 1" in result.message
     assert "scoring errors: 1" in result.message
     with database.connect() as connection:
@@ -153,16 +158,16 @@ async def test_failed_delivery_does_not_mark_listings_shown(database):
 @pytest.mark.asyncio
 async def test_deterministic_tie_break_uses_title_then_company(database):
     jobs = [
-        listing("b", "Same", "Beta"),
-        listing("a", "Same", "Acme"),
+        listing("a", "Zeta", "Beta"),
+        listing("z", "Alpha", "Acme"),
     ]
 
     result = await run_pipeline(
         db=database,
         sources=[FakeSource("test", jobs)],
-        scorer=FakeScorer({"a": ScoreResult(8, "A"), "b": ScoreResult(8, "B")}),
+        scorer=FakeScorer({"a": ScoreResult(8, "A"), "z": ScoreResult(8, "B")}),
         profile="profile",
         min_score=0,
     )
 
-    assert result.shown_listing_ids == ("a", "b")
+    assert result.shown_listing_ids == ("z", "a")

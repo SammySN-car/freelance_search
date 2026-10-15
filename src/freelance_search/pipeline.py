@@ -84,6 +84,7 @@ async def run_pipeline(
     min_score: float,
     digest_date: date | None = None,
     client: httpx.AsyncClient | None = None,
+    serpapi_queries_used: int = 0,
 ) -> PreparedDigest:
     run_id = db.start_run()
     source_stats: dict[str, dict[str, int]] = {}
@@ -144,6 +145,7 @@ async def run_pipeline(
             scored_count=len(batch.scores),
             source_stats=source_stats,
             scoring_errors=batch.errors,
+            serpapi_queries_used=serpapi_queries_used,
             error="; ".join(f"{name}: {error}" for name, error in source_errors.items()) or None,
         )
         return PreparedDigest(

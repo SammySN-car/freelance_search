@@ -39,8 +39,21 @@ The project is designed around local execution:
    ```
 
 The source adapters are implemented behind one normalized listing interface.
-The source adapters and Ollama scoring client are implemented. The scheduler,
-pipeline orchestration, and Discord commands are delivered in later milestones.
+The source adapters, Ollama scoring client, pipeline, scheduler, and
+owner-only Discord commands are implemented.
+
+## Run the bot
+
+After configuring `.env` and confirming Ollama is running:
+
+```powershell
+python -m freelance_search
+```
+
+The bot schedules one daily run at `DIGEST_TIME` in `DIGEST_TIMEZONE`.
+`/refresh` runs immediately and replies manually; scheduled empty results stay
+quiet. `/status` reports the latest run, source/query counts, Ollama health,
+and scheduler state.
 
 ## Digest behavior
 

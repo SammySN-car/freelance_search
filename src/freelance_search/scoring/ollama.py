@@ -56,6 +56,7 @@ class OllamaScorer:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = httpx.Timeout(timeout_seconds)
+        self.last_health: OllamaHealth | None = None
 
     async def score_listing(
         self,
@@ -110,6 +111,8 @@ class OllamaScorer:
                 models = response.json().get("models", [])
             names = {model.get("name") for model in models if isinstance(model, dict)}
             model_present = self.model in names
-            return OllamaHealth(reachable=True, model_present=model_present)
+            self.last_health = OllamaHealth(reachable=True, model_present=model_present)
+            return self.last_health
         except (httpx.HTTPError, ValueError, TypeError) as exc:
-            return OllamaHealth(reachable=False, model_present=False, error=str(exc))
+            self.last_health = OllamaHealth(reachable=False, model_present=False, error=str(exc))
+            return self.last_health
