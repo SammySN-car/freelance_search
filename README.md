@@ -48,7 +48,7 @@ Keep `.env` private. It is ignored by Git and must never be committed.
 
 | Command / event | Who | Behavior |
 |---|---|---|
-| `/refresh` | Owner only | Runs the pipeline immediately and replies with the digest, including the empty result. |
+| `/refresh` | Owner only | Runs the pipeline immediately, posts the digest to the configured channel, and returns a short confirmation; empty results are still acknowledged. |
 | `/status` | Owner only | Shows the latest run, counts, source failures, SerpApi query usage, Ollama health, and scheduler state. |
 | Scheduled daily digest | Automatic | Runs at `DIGEST_TIME` in `DIGEST_TIMEZONE`; posts nothing when there are no new matching jobs. |
 
@@ -72,8 +72,8 @@ fetch -> dedup -> retrieve (embeddings) -> rerank (local Gemma) -> digest -> del
   which must return strict JSON with a numeric score from 0–10 and a one-line
   reason. No listing is dropped by keyword matching.
 - **Digest:** Scores below `MIN_SCORE` are removed; results are sorted
-  deterministically, capped at five, and kept below Discord's 2,000-character
-  limit.
+  deterministically and capped at five in a Discord embed with masked links,
+  keeping long tracking URLs out of the visible message.
 - **Deliver:** the prepared message is sent first; only a confirmed send marks
   its listing IDs as shown.
 

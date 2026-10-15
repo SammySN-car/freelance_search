@@ -106,6 +106,7 @@ class BotService:
                     serpapi_queries_used=len(self.settings.serpapi_queries),
                     embedder=self.embedder,
                     max_to_score=self.settings.max_to_score,
+                    score_model=self.settings.ollama_model,
                 )
                 self.last_error = None
                 return result
@@ -210,7 +211,7 @@ def create_bot(settings: Settings, database: Database | None = None) -> commands
             channel = inspect_discord_channel(bot, settings.discord_channel_id)
             if channel is None:
                 raise RuntimeError("Configured Discord channel was not found")
-            await channel.send(result.message)
+            await channel.send(result.message, embed=result.embed)
         except Exception as exc:
             service.delivery_failed(result, exc)
             await interaction.followup.send(
@@ -241,7 +242,7 @@ def create_bot(settings: Settings, database: Database | None = None) -> commands
             channel = inspect_discord_channel(bot, settings.discord_channel_id)
             if channel is None:
                 raise RuntimeError("Configured Discord channel was not found")
-            await channel.send(result.message)
+            await channel.send(result.message, embed=result.embed)
             service.deliver(result)
         except Exception as exc:
             service.last_error = f"Scheduled run failed: {exc}"

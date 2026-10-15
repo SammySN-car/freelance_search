@@ -74,7 +74,7 @@ async def test_successful_delivery_marks_only_after_send(database):
         ]
     )
 
-    await channel.send(result.message)
+    await channel.send(result.message, embed=result.embed)
     service.deliver(result)
 
     assert database.unshown_listing_ids(["job-1"]) == set()
@@ -121,7 +121,7 @@ async def test_refresh_success_sends_public_digest_and_short_ack(database):
 
     await command.callback(Interaction())
 
-    channel.send.assert_awaited_once_with(result.message)
+    channel.send.assert_awaited_once_with(result.message, embed=result.embed)
     Interaction.followup.send.assert_awaited_once_with(
         "Digest posted · judged 30 · new 12",
         ephemeral=True,

@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 
 from freelance_search.models import EmbeddingBatchResult, ScoreBatchResult, ScoreResult
-from freelance_search.pipeline import run_pipeline
+from freelance_search.pipeline import format_digest, run_pipeline
 
 
 class FakeSource:
@@ -71,6 +71,58 @@ def listing(identifier, title="RAG Engineer", company="Acme", length=20):
     )
 
 
+def test_embed_builder_masks_urls_truncates_names_and_sets_footer():
+    jobs = [
+        (
+            listing(str(index), "Very long title " + ("x" * 300)),
+            ScoreResult(9 - index / 10, "Strong match"),
+        )
+        for index in range(5)
+    ]
+    urls = [job.url for job, _ in jobs]
+
+    message, embed, shown_ids = format_digest(
+        jobs,
+        digest_date=date(2026, 10, 16),
+        footer="sources 2 · fetched 5 · new 5 · judged 5",
+    )
+
+    assert message == ""
+    assert len(embed.fields) == 5
+    assert shown_ids == tuple(str(index) for index in range(5))
+    assert all(len(field.name) <= 256 for field in embed.fields)
+    assert all(field.name.endswith("x" * 10) for field in embed.fields)
+    assert all(url in field.value for url, field in zip(urls, embed.fields, strict=True))
+    assert all("[Apply ->](" in field.value for field in embed.fields)
+    assert embed.footer.text.endswith(" · scored by local gemma3:4b")
+
+
+def test_embed_builder_drops_field_when_full_url_cannot_fit():
+    long_url = "https://jobs.test/" + ("x" * 1100)
+    job = listing("long")
+    job = type(job)(
+        job.listing_id,
+        job.title,
+        job.company,
+        long_url,
+        job.source,
+        job.description,
+        job.pay,
+        job.location,
+        job.published_at,
+    )
+    ranked = [(job, ScoreResult(9, "Strong match"))]
+
+    _, embed, shown_ids = format_digest(
+        ranked,
+        digest_date=date(2026, 10, 16),
+        footer="sources 1 · fetched 1 · new 1 · judged 1",
+    )
+
+    assert len(embed.fields) == 0
+    assert shown_ids == ()
+
+
 @pytest.mark.asyncio
 async def test_pipeline_deduplicates_filters_sorts_caps_and_records_run(database):
     jobs = [
@@ -108,8 +160,8 @@ async def test_pipeline_deduplicates_filters_sorts_caps_and_records_run(database
             "SELECT title FROM listings WHERE listing_id = '2'"
         ).fetchone()
     assert duplicate["title"] == "Duplicate"
-    assert "source errors: 1" in result.message
-    assert "scoring errors: 1" in result.message
+    assert "source errors: 1" in result.embed.footer.text
+    assert "scoring errors: 1" in result.embed.footer.text
     with database.connect() as connection:
         run = connection.execute("SELECT * FROM runs").fetchone()
     assert run["status"] == "completed"
@@ -146,7 +198,22 @@ async def test_already_shown_jobs_are_not_scored_or_returned(database):
 
 @pytest.mark.asyncio
 async def test_long_entries_drop_lowest_without_truncating_urls(database):
-    jobs = [listing(str(index), f"Job {index} " + ("x" * 600)) for index in range(1, 6)]
+    jobs = []
+    for index in range(1, 6):
+        item = listing(str(index), f"Job {index}")
+        jobs.append(
+            type(item)(
+                item.listing_id,
+                item.title,
+                item.company,
+                f"https://jobs.test/{index}/" + ("x" * 1100),
+                item.source,
+                item.description,
+                item.pay,
+                item.location,
+                item.published_at,
+            )
+        )
     scores = {str(index): ScoreResult(10 - index / 10, "Reason") for index in range(1, 6)}
 
     result = await run_pipeline(
@@ -158,10 +225,8 @@ async def test_long_entries_drop_lowest_without_truncating_urls(database):
         digest_date=date(2026, 10, 15),
     )
 
-    assert len(result.message) <= 2000
-    assert result.shown_listing_ids == ("1", "2")
-    assert "https://jobs.test/1" in result.message
-    assert "https://jobs.test/3" not in result.message
+    assert len(result.embed.fields) == 0
+    assert result.shown_listing_ids == ()
 
 
 @pytest.mark.asyncio
@@ -268,4 +333,4 @@ async def test_embedding_failure_keeps_listing_for_next_run(database):
     )
 
     assert result.stats["embedded"] == 1
-    assert "retry" in result.message
+    assert any("retry" in field.value for field in result.embed.fields)

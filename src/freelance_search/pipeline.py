@@ -1,13 +1,15 @@
 from collections.abc import Iterable, Sequence
 from datetime import date, datetime
 
+import discord
 import httpx
 
 from .db import Database
 from .models import EmbeddingBatchResult, Listing, ScoreBatchResult, ScoreResult
 
-DISCORD_MESSAGE_LIMIT = 2000
 MAX_DIGEST_ENTRIES = 5
+EMBED_FIELD_NAME_LIMIT = 256
+EMBED_FIELD_VALUE_LIMIT = 1024
 
 
 class PipelineSource:
@@ -44,6 +46,7 @@ class PreparedDigest:
         scoring_errors: dict[str, str],
         run_id: int,
         embedding_errors: dict[str, str] | None = None,
+        embed: discord.Embed | None = None,
     ) -> None:
         self.message = message
         self.shown_listing_ids = shown_listing_ids
@@ -52,6 +55,7 @@ class PreparedDigest:
         self.source_errors = source_errors
         self.scoring_errors = scoring_errors
         self.embedding_errors = embedding_errors or {}
+        self.embed = embed
         self.run_id = run_id
 
 
@@ -75,31 +79,31 @@ def _identity_deduplicate(listings: Iterable[Listing]) -> list[Listing]:
     return list(selected.values())
 
 
-def _entry(number: int, listing: Listing, score: ScoreResult) -> str:
-    pay = f" · {listing.pay}" if listing.pay else ""
-    return (
-        f"{number}. {listing.title} · {listing.company}{pay} · {score.score:g}/10 · "
-        f"{score.reason} · {listing.url}"
-    )
-
-
 def format_digest(
     ranked: Sequence[tuple[Listing, ScoreResult]],
     *,
     digest_date: date,
     footer: str,
-) -> tuple[str, tuple[str, ...]]:
-    header = f"Freelance shortlist - {digest_date.isoformat()}"
-    selected = list(ranked[:MAX_DIGEST_ENTRIES])
-    while selected:
-        entries = "\n".join(
-            _entry(index, listing, score) for index, (listing, score) in enumerate(selected, 1)
-        )
-        message = f"{header}\n\n{entries}\n\n{footer}"
-        if len(message) <= DISCORD_MESSAGE_LIMIT:
-            return message, tuple(listing.listing_id for listing, _ in selected)
+    score_model: str = "gemma3:4b",
+) -> tuple[str, discord.Embed, tuple[str, ...]]:
+    embed = discord.Embed(title=f"Freelance shortlist - {digest_date.isoformat()}")
+    selected: list[tuple[Listing, ScoreResult, str, str]] = []
+    for listing, score in ranked[:MAX_DIGEST_ENTRIES]:
+        prefix = f"{score.score:g}/10 · {listing.company} · "
+        title_limit = max(0, EMBED_FIELD_NAME_LIMIT - len(prefix))
+        name = f"{prefix[:EMBED_FIELD_NAME_LIMIT]}{listing.title[:title_limit]}"
+        value = f"{score.reason}\n[Apply ->]({listing.url})"
+        selected.append((listing, score, name, value))
+    while selected and any(len(value) > EMBED_FIELD_VALUE_LIMIT for *_, value in selected):
         selected.pop()
-    return f"{header}\n\n{footer}", ()
+    for _listing, _, name, value in selected:
+        embed.add_field(
+            name=name,
+            value=value,
+            inline=False,
+        )
+    embed.set_footer(text=f"{footer} · scored by local {score_model}")
+    return "", embed, tuple(listing.listing_id for listing, _, _, _ in selected)
 
 
 async def run_pipeline(
@@ -114,6 +118,7 @@ async def run_pipeline(
     serpapi_queries_used: int = 0,
     embedder: PipelineEmbedder | None = None,
     max_to_score: int = 30,
+    score_model: str = "gemma3:4b",
 ) -> PreparedDigest:
     run_id = db.start_run()
     source_stats: dict[str, dict[str, int]] = {}
@@ -196,8 +201,8 @@ async def run_pipeline(
         )
         date_value = digest_date or datetime.now().date()
         footer = (
-            f"Sources: {len(source_stats)} · fetched: {len(fetched)} · new: {len(new_listings)} · "
-            f"scored: {len(batch.scores)}"
+            f"sources {len(source_stats)} · fetched {len(fetched)} · new {len(new_listings)} · "
+            f"judged {judged_count}"
         )
         if source_errors:
             footer += f" · source errors: {len(source_errors)}"
@@ -206,7 +211,12 @@ async def run_pipeline(
         if embedding_errors:
             footer += f" · embedding errors: {len(embedding_errors)}"
         if ranked:
-            message, shown_ids = format_digest(ranked, digest_date=date_value, footer=footer)
+            message, embed, shown_ids = format_digest(
+                ranked,
+                digest_date=date_value,
+                footer=footer,
+                score_model=score_model,
+            )
             empty = False
         else:
             message = (
@@ -214,6 +224,7 @@ async def run_pipeline(
                 f"No new matching jobs.\n\n{footer}"
             )
             shown_ids = ()
+            embed = None
             empty = True
         db.finish_run(
             run_id,
@@ -247,6 +258,7 @@ async def run_pipeline(
             scoring_errors=batch.errors,
             run_id=run_id,
             embedding_errors=embedding_errors,
+            embed=embed,
         )
     finally:
         if own_client:
