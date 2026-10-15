@@ -109,9 +109,7 @@ class OllamaScorer:
                 response.raise_for_status()
                 models = response.json().get("models", [])
             names = {model.get("name") for model in models if isinstance(model, dict)}
-            model_present = self.model in names or any(
-                name and name.split(":")[0] == self.model.split(":")[0] for name in names
-            )
+            model_present = self.model in names
             return OllamaHealth(reachable=True, model_present=model_present)
         except (httpx.HTTPError, ValueError, TypeError) as exc:
             return OllamaHealth(reachable=False, model_present=False, error=str(exc))

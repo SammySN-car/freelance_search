@@ -1,5 +1,7 @@
+import json
 import sqlite3
 from collections.abc import Iterable
+from datetime import datetime
 from pathlib import Path
 
 from .models import Listing
@@ -30,10 +32,13 @@ CREATE TABLE IF NOT EXISTS runs (
     status TEXT NOT NULL,
     fetched_count INTEGER NOT NULL DEFAULT 0,
     new_count INTEGER NOT NULL DEFAULT 0,
+    deduped_count INTEGER NOT NULL DEFAULT 0,
     scored_count INTEGER NOT NULL DEFAULT 0,
     shown_count INTEGER NOT NULL DEFAULT 0,
     serpapi_queries_used INTEGER NOT NULL DEFAULT 0,
-    error TEXT
+    error TEXT,
+    source_stats TEXT NOT NULL DEFAULT '{}',
+    scoring_errors TEXT NOT NULL DEFAULT '{}'
 );
 """
 
@@ -52,6 +57,23 @@ class Database:
     def initialize(self) -> None:
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(runs)")
+            }
+            migrations = {
+                "deduped_count": (
+                    "ALTER TABLE runs ADD COLUMN deduped_count INTEGER NOT NULL DEFAULT 0"
+                ),
+                "source_stats": (
+                    "ALTER TABLE runs ADD COLUMN source_stats TEXT NOT NULL DEFAULT '{}'"
+                ),
+                "scoring_errors": (
+                    "ALTER TABLE runs ADD COLUMN scoring_errors TEXT NOT NULL DEFAULT '{}'"
+                ),
+            }
+            for column, statement in migrations.items():
+                if column not in columns:
+                    connection.execute(statement)
 
     def save_listings(self, listings: Iterable[Listing]) -> int:
         rows = [
@@ -90,7 +112,14 @@ class Database:
                 f"""
                 SELECT listing_id FROM listings
                 WHERE listing_id IN ({placeholders})
-                AND listing_id NOT IN (SELECT listing_id FROM shown_listings)
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM shown_listings AS shown
+                    JOIN listings AS shown_listing
+                      ON shown_listing.listing_id = shown.listing_id
+                    WHERE shown.listing_id = listings.listing_id
+                       OR shown_listing.url = listings.url
+                )
                 """,
                 ids,
             )
@@ -101,4 +130,45 @@ class Database:
             connection.executemany(
                 "INSERT OR IGNORE INTO shown_listings (listing_id) VALUES (?)",
                 ((listing_id,) for listing_id in listing_ids),
+            )
+
+    def start_run(self) -> int:
+        with self.connect() as connection:
+            cursor = connection.execute("INSERT INTO runs (status) VALUES (?)", ("running",))
+            return int(cursor.lastrowid)
+
+    def finish_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        fetched_count: int,
+        new_count: int,
+        deduped_count: int,
+        scored_count: int,
+        source_stats: dict[str, dict[str, int]],
+        scoring_errors: dict[str, str],
+        error: str | None = None,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE runs
+                SET completed_at = ?, status = ?, fetched_count = ?, new_count = ?,
+                    deduped_count = ?, scored_count = ?, source_stats = ?,
+                    scoring_errors = ?, error = ?
+                WHERE run_id = ?
+                """,
+                (
+                    datetime.now().isoformat(),
+                    status,
+                    fetched_count,
+                    new_count,
+                    deduped_count,
+                    scored_count,
+                    json.dumps(source_stats, sort_keys=True),
+                    json.dumps(scoring_errors, sort_keys=True),
+                    error,
+                    run_id,
+                ),
             )

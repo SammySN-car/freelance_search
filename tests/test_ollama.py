@@ -118,6 +118,19 @@ async def test_health_check_reports_reachability_and_model():
 
 
 @pytest.mark.asyncio
+@respx.mock
+async def test_health_check_requires_exact_model_tag():
+    respx.get(f"http://ollama.test{TAGS_PATH}").mock(
+        return_value=httpx.Response(200, json={"models": [{"name": "gemma3:12b"}]})
+    )
+
+    health = await scorer().health_check()
+
+    assert health.reachable is True
+    assert health.model_present is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.live
 async def test_live_ollama_scoring():
     live_scorer = OllamaScorer("http://127.0.0.1:11434", "gemma3:4b", timeout_seconds=180)

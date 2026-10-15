@@ -11,7 +11,11 @@ The project is designed around local execution:
 - Ollama performs scoring locally; no cloud LLM is used.
 - Scoring requires strict JSON with a numeric 0–10 score and one-line reason;
   malformed or failed requests are recorded as explicit errors.
+- Ollama health checks require the configured model tag to match exactly, so a
+  similarly named or differently tagged model is not reported as available.
 - SQLite permanently records listings shown in a digest.
+- Pipeline preparation never marks listings as shown; the Discord delivery
+  caller marks the returned IDs only after a successful send.
 - The Discord bot is owner-only and does not apply for jobs or write bids.
 
 ## Setup
