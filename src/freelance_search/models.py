@@ -19,3 +19,16 @@ class Listing:
 class ScoreResult:
     score: float
     reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreBatchResult:
+    scores: dict[str, ScoreResult]
+    errors: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class OllamaHealth:
+    reachable: bool
+    model_present: bool
+    error: str | None = None

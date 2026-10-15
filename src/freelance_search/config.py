@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     database_path: Path = Path("data/freelance_search.db")
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "gemma3:4b"
+    ollama_timeout_seconds: float = Field(default=180.0, gt=0)
     min_score: float = Field(default=5.0, ge=0, le=10)
     serpapi_queries: list[str] = Field(
         default_factory=lambda: [

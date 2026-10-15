@@ -9,6 +9,8 @@ The project is designed around local execution:
 - SerpApi Google Jobs is the primary source, limited to 3–5 queries per run.
 - RemoteOK, Jobicy, Arbeitnow, and We Work Remotely are no-key fallback sources.
 - Ollama performs scoring locally; no cloud LLM is used.
+- Scoring requires strict JSON with a numeric 0–10 score and one-line reason;
+  malformed or failed requests are recorded as explicit errors.
 - SQLite permanently records listings shown in a digest.
 - The Discord bot is owner-only and does not apply for jobs or write bids.
 
@@ -33,8 +35,8 @@ The project is designed around local execution:
    ```
 
 The source adapters are implemented behind one normalized listing interface.
-The scoring, scheduler, pipeline orchestration, and Discord commands are
-delivered in later milestones.
+The source adapters and Ollama scoring client are implemented. The scheduler,
+pipeline orchestration, and Discord commands are delivered in later milestones.
 
 ## Digest behavior
 
