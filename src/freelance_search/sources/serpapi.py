@@ -1,0 +1,42 @@
+import httpx
+
+from ..models import Listing
+from .base import require_success, source_id
+
+SERPAPI_URL = "https://serpapi.com/search.json"
+
+
+class SerpApiSource:
+    name = "serpapi"
+
+    def __init__(self, api_key: str, queries: list[str]) -> None:
+        self.api_key = api_key
+        self.queries = queries
+
+    async def fetch(self, client: httpx.AsyncClient) -> list[Listing]:
+        listings: list[Listing] = []
+        for query in self.queries:
+            response = await client.get(
+                SERPAPI_URL,
+                params={"engine": "google_jobs", "q": query, "api_key": self.api_key},
+            )
+            require_success(response)
+            payload = response.json()
+            for job in payload.get("jobs_results", []):
+                url = job.get("share_link") or job.get("link")
+                if not url:
+                    continue
+                job_id = job.get("job_id") or url
+                listings.append(
+                    Listing(
+                        listing_id=source_id(self.name, str(job_id)),
+                        title=job.get("title", "Untitled job"),
+                        company=job.get("company_name", "Unknown company"),
+                        url=url,
+                        source=self.name,
+                        description=job.get("description", ""),
+                        pay=job.get("detected_extensions", {}).get("salary"),
+                        location=job.get("location"),
+                    )
+                )
+        return listings

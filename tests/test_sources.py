@@ -1,0 +1,119 @@
+import httpx
+import pytest
+import respx
+
+from freelance_search.sources.arbeitnow import ARBEITNOW_URL, ArbeitnowSource
+from freelance_search.sources.jobicy import JOBICY_URL, JobicySource
+from freelance_search.sources.remoteok import REMOTEOK_URL, RemoteOKSource
+from freelance_search.sources.serpapi import SERPAPI_URL, SerpApiSource
+from freelance_search.sources.weworkremotely import WWR_RSS_URL, WeWorkRemotelySource
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_serpapi_normalizes_jobs():
+    respx.get(SERPAPI_URL).mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "jobs_results": [
+                        {
+                            "job_id": "abc",
+                            "title": "RAG Engineer",
+                            "company_name": "Acme",
+                            "share_link": "https://jobs.test/abc",
+                            "description": "Build retrieval systems.",
+                            "detected_extensions": {"salary": "$50/hr"},
+                            "location": "Remote",
+                        }
+                    ]
+                },
+            ),
+            httpx.Response(200, json={"jobs_results": []}),
+            httpx.Response(200, json={"jobs_results": []}),
+        ]
+    )
+
+    async with httpx.AsyncClient() as client:
+        listings = await SerpApiSource("key", ["one", "two", "three"]).fetch(client)
+
+    assert listings[0].listing_id == "serpapi:abc"
+    assert listings[0].title == "RAG Engineer"
+    assert listings[0].pay == "$50/hr"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "url", "payload", "expected_id"),
+    [
+        (
+            RemoteOKSource(),
+            REMOTEOK_URL,
+            [{"id": 7, "position": "ML Engineer", "company": "Acme", "url": "https://job.test/7"}],
+            "remoteok:7",
+        ),
+        (
+            JobicySource(),
+            JOBICY_URL,
+            {
+                "jobs": [
+                    {
+                        "id": 8,
+                        "jobTitle": "Python Engineer",
+                        "companyName": "Beta",
+                        "url": "https://job.test/8",
+                    }
+                ]
+            },
+            "jobicy:8",
+        ),
+        (
+            ArbeitnowSource(),
+            ARBEITNOW_URL,
+            {
+                "data": [
+                    {
+                        "slug": "python-engineer",
+                        "title": "Python Engineer",
+                        "company_name": "Gamma",
+                        "url": "https://job.test/9",
+                    }
+                ]
+            },
+            "arbeitnow:python-engineer",
+        ),
+    ],
+)
+@respx.mock
+async def test_json_sources_normalize_listings(source, url, payload, expected_id):
+    respx.get(url).mock(return_value=httpx.Response(200, json=payload))
+
+    async with httpx.AsyncClient() as client:
+        listings = await source.fetch(client)
+
+    assert listings[0].listing_id == expected_id
+    assert listings[0].url.startswith("https://job.test/")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_we_work_remotely_normalizes_rss():
+    respx.get(WWR_RSS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            content=(
+                b'<?xml version="1.0"?><rss><channel><item>'
+                b"<title>ML Engineer at Delta</title>"
+                b"<link>https://job.test/rss</link><author>Delta</author>"
+                b"<description>Build ML systems.</description>"
+                b"</item></channel></rss>"
+            ),
+        )
+    )
+
+    async with httpx.AsyncClient() as client:
+        listings = await WeWorkRemotelySource().fetch(client)
+
+    assert listings[0].listing_id == "weworkremotely:https://job.test/rss"
+    assert listings[0].company == "Delta"
