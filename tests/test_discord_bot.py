@@ -5,7 +5,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from freelance_search.config import Settings
-from freelance_search.discord_bot import BotService, create_bot, is_owner, next_digest_at
+from freelance_search.discord_bot import (
+    BotService,
+    create_bot,
+    inspect_discord_channel,
+    is_owner,
+    next_digest_at,
+    refresh_ack,
+)
 from freelance_search.models import Listing, OllamaHealth, ScoreBatchResult
 from freelance_search.pipeline import PreparedDigest
 
@@ -78,6 +85,61 @@ def test_non_owner_is_rejected_by_owner_guard():
     assert is_owner(123, 123) is True
 
 
+def test_startup_channel_check_finds_configured_channel():
+    channel = type("Channel", (), {"id": 456, "name": "jobs"})()
+    bot = type(
+        "Bot",
+        (),
+        {"get_channel": lambda self, channel_id: channel, "guilds": []},
+    )()
+
+    assert inspect_discord_channel(bot, 456) is channel
+
+
+def test_bot_enables_only_guild_intent(database):
+    bot = create_bot(make_settings(), database)
+
+    assert bot.intents.guilds is True
+    assert bot.intents.message_content is False
+    assert bot.intents.members is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_success_sends_public_digest_and_short_ack(database):
+    bot = create_bot(make_settings(), database)
+    result = prepared(ids=(), empty=True)
+    result.stats.update({"judged": 30, "new": 12})
+    bot.service.run = AsyncMock(return_value=result)
+    channel = AsyncMock()
+    bot.get_channel = lambda channel_id: channel
+    command = bot.tree.get_command("refresh")
+
+    class Interaction:
+        user = type("User", (), {"id": 123})()
+        response = AsyncMock()
+        followup = AsyncMock()
+
+    await command.callback(Interaction())
+
+    channel.send.assert_awaited_once_with(result.message)
+    Interaction.followup.send.assert_awaited_once_with(
+        "Digest posted · judged 30 · new 12",
+        ephemeral=True,
+    )
+
+
+def test_startup_channel_check_reports_missing_channel():
+    text_channel = type("Channel", (), {"id": 789, "name": "general"})()
+    guild = type("Guild", (), {"id": 1, "name": "My Server", "channels": [text_channel]})()
+    bot = type(
+        "Bot",
+        (),
+        {"get_channel": lambda self, channel_id: None, "guilds": [guild]},
+    )()
+
+    assert inspect_discord_channel(bot, 456) is None
+
+
 @pytest.mark.asyncio
 async def test_refresh_command_rejects_non_owner(database):
     bot = create_bot(make_settings(), database)
@@ -90,6 +152,13 @@ async def test_refresh_command_rejects_non_owner(database):
     await command.callback(Interaction())
 
     Interaction.response.send_message.assert_awaited_once_with("Owner only.", ephemeral=True)
+
+
+def test_refresh_ack_is_short_and_contains_run_counts():
+    result = prepared()
+    result.stats.update({"judged": 30, "new": 12})
+
+    assert refresh_ack(result) == "Digest posted · judged 30 · new 12"
 
 
 @pytest.mark.asyncio
@@ -166,4 +235,8 @@ async def test_status_contains_run_counts_query_count_and_ollama_health(database
     assert "SerpApi queries: 3" in message
     assert "reachable=True" in message
     assert "present=True" in message
+    assert "Discord channel: NOT FOUND" in message
     assert "Scheduler: running" in message
+
+    service.set_discord_channel(type("Channel", (), {"name": "jobs"})())
+    assert "Discord channel: OK (#jobs)" in service.status_message("running")

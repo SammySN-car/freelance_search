@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -18,6 +19,43 @@ from .sources import (
     SerpApiSource,
     WeWorkRemotelySource,
 )
+
+LOGGER = logging.getLogger(__name__)
+CHANNEL_HINT = (
+    "DISCORD_CHANNEL_ID must be a channel ID copied via Developer Mode from a "
+    "channel this bot can see — a server ID will not work."
+)
+
+
+def inspect_discord_channel(bot: commands.Bot, channel_id: int) -> object | None:
+    channel = bot.get_channel(channel_id)
+    LOGGER.info("Configured Discord channel ID: %s", channel_id)
+    if channel is not None:
+        LOGGER.info(
+            "Configured Discord channel found: #%s (%s)",
+            getattr(channel, "name", "unknown"),
+            channel_id,
+        )
+        return channel
+
+    LOGGER.error("Configured Discord channel ID %s was not found.", channel_id)
+    for guild in getattr(bot, "guilds", []):
+        LOGGER.error("Guild: %s (%s)", getattr(guild, "name", "unknown"), guild.id)
+        for candidate in getattr(guild, "channels", []):
+            LOGGER.error(
+                "  Text channel: #%s (%s)",
+                getattr(candidate, "name", "unknown"),
+                candidate.id,
+            )
+    LOGGER.error(CHANNEL_HINT)
+    return None
+
+
+def refresh_ack(result: PreparedDigest) -> str:
+    return (
+        f"Digest posted · judged {result.stats.get('judged', 0)} · "
+        f"new {result.stats.get('new', 0)}"
+    )
 
 
 def next_digest_at(now: datetime, digest_time: str, timezone: str) -> datetime:
@@ -49,6 +87,10 @@ class BotService:
         self.embedder = embedder
         self.run_lock = asyncio.Lock()
         self.last_error: str | None = None
+        self.discord_channel_name: str | None = None
+
+    def set_discord_channel(self, channel: object | None) -> None:
+        self.discord_channel_name = getattr(channel, "name", None) if channel else None
 
     async def run(self) -> PreparedDigest | None:
         if self.run_lock.locked():
@@ -106,7 +148,14 @@ class BotService:
                 f"Ollama: reachable={health.reachable} · "
                 f"model {self.settings.ollama_model} present={health.model_present}"
             )
-        return f"{run_summary}\n{health_summary}\nScheduler: {scheduler_state}"
+        if self.discord_channel_name:
+            channel_summary = f"Discord channel: OK (#{self.discord_channel_name})"
+        else:
+            channel_summary = (
+                "Discord channel: NOT FOUND — fix DISCORD_CHANNEL_ID "
+                "(see startup log)"
+            )
+        return f"{run_summary}\n{health_summary}\n{channel_summary}\nScheduler: {scheduler_state}"
 
 
 def build_sources(settings: Settings) -> list:
@@ -134,6 +183,7 @@ def create_bot(settings: Settings, database: Database | None = None) -> commands
     )
     service = BotService(settings, database, build_sources(settings), scorer, embedder)
     intents = discord.Intents.none()
+    intents.guilds = True
     bot = commands.Bot(command_prefix="!", intents=intents)
 
     def owner_only(interaction: discord.Interaction) -> bool:
@@ -157,19 +207,19 @@ def create_bot(settings: Settings, database: Database | None = None) -> commands
             await interaction.followup.send("Run already in progress.", ephemeral=True)
             return
         try:
-            channel = bot.get_channel(settings.discord_channel_id)
+            channel = inspect_discord_channel(bot, settings.discord_channel_id)
             if channel is None:
                 raise RuntimeError("Configured Discord channel was not found")
             await channel.send(result.message)
         except Exception as exc:
             service.delivery_failed(result, exc)
             await interaction.followup.send(
-                f"{result.message}\n\nDelivery failed; listings were not marked shown.",
+                f"Delivery failed: {exc}. Listings were not marked shown.",
                 ephemeral=True,
             )
             return
         service.deliver(result)
-        await interaction.followup.send(result.message, ephemeral=True)
+        await interaction.followup.send(refresh_ack(result), ephemeral=True)
 
     @bot.tree.command(name="status", description="Show freelance search status")
     async def status(interaction: discord.Interaction) -> None:
@@ -188,7 +238,7 @@ def create_bot(settings: Settings, database: Database | None = None) -> commands
             result = await service.run()
             if result is None or result.empty:
                 return
-            channel = bot.get_channel(settings.discord_channel_id)
+            channel = inspect_discord_channel(bot, settings.discord_channel_id)
             if channel is None:
                 raise RuntimeError("Configured Discord channel was not found")
             await channel.send(result.message)
@@ -208,6 +258,9 @@ def create_bot(settings: Settings, database: Database | None = None) -> commands
 
     @bot.event
     async def on_ready() -> None:
+        service.set_discord_channel(
+            inspect_discord_channel(bot, settings.discord_channel_id)
+        )
         if not scheduled_run.is_running():
             scheduled_run.start()
         await bot.tree.sync()
