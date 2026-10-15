@@ -8,7 +8,7 @@ from freelance_search.config import Settings
 
 def test_settings_require_secrets():
     with pytest.raises(ValidationError):
-        Settings()
+        Settings(_env_file=None)
 
 
 def test_settings_validate_query_count():

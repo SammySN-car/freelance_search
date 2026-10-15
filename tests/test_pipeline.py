@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from freelance_search.models import ScoreBatchResult, ScoreResult
+from freelance_search.models import EmbeddingBatchResult, ScoreBatchResult, ScoreResult
 from freelance_search.pipeline import run_pipeline
 
 
@@ -22,8 +22,10 @@ class FakeScorer:
     def __init__(self, scores, errors=None):
         self.scores = scores
         self.errors = errors or {}
+        self.calls = []
 
     async def score_many(self, listings, profile):
+        self.calls.append([listing.listing_id for listing in listings])
         return ScoreBatchResult(
             scores={
                 listing.listing_id: self.scores[listing.listing_id]
@@ -32,6 +34,28 @@ class FakeScorer:
             },
             errors=self.errors,
         )
+
+
+class FakeEmbedder:
+    def __init__(self, similarities):
+        self.similarity_values = similarities
+        self.calls = []
+
+    async def embed_listings(self, listings, profile):
+        self.calls.append([listing.listing_id for listing in listings])
+        return EmbeddingBatchResult(
+            {
+                listing.listing_id: [self.similarity_values[listing.listing_id], 1.0]
+                for listing in listings
+            },
+            {},
+        )
+
+    def similarities(self, embeddings):
+        return {
+            listing_id: self.similarity_values[listing_id]
+            for listing_id in embeddings
+        }
 
 
 def listing(identifier, title="RAG Engineer", company="Acme", length=20):
@@ -171,3 +195,77 @@ async def test_deterministic_tie_break_uses_title_then_company(database):
     )
 
     assert result.shown_listing_ids == ("z", "a")
+
+
+@pytest.mark.asyncio
+async def test_retrieval_ranks_judging_and_judge_once(database):
+    jobs = [listing(str(index), f"Job {index}") for index in range(1, 32)]
+    similarity = {str(index): 1.0 - index / 100 for index in range(1, 32)}
+    scorer = FakeScorer(
+        {str(index): ScoreResult(8, f"reason {index}") for index in range(1, 32)}
+    )
+    embedder = FakeEmbedder(similarity)
+
+    first = await run_pipeline(
+        db=database,
+        sources=[FakeSource("test", jobs)],
+        scorer=scorer,
+        embedder=embedder,
+        max_to_score=30,
+        profile="profile",
+        min_score=0,
+    )
+    second = await run_pipeline(
+        db=database,
+        sources=[FakeSource("test", jobs)],
+        scorer=scorer,
+        embedder=embedder,
+        max_to_score=30,
+        profile="profile",
+        min_score=0,
+    )
+
+    assert "https://jobs.test/31" not in first.message
+    assert len(embedder.calls[0]) == 31
+    assert len(embedder.calls) == 1
+    assert "31" not in scorer.calls[0]
+    assert scorer.calls[1] == ["31"]
+    assert second.stats["judged"] == 1
+
+
+@pytest.mark.asyncio
+async def test_embedding_failure_keeps_listing_for_next_run(database):
+    jobs = [listing("good"), listing("retry")]
+    embedder = FakeEmbedder({"good": 0.9, "retry": 0.8})
+    original = embedder.embed_listings
+    calls = 0
+
+    async def fail_once(listings, profile):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return EmbeddingBatchResult({"good": [0.9, 1.0]}, {"retry": "batch failed"})
+        return await original(listings, profile)
+
+    embedder.embed_listings = fail_once
+    scorer = FakeScorer({"good": ScoreResult(9, "good"), "retry": ScoreResult(8, "retry")})
+
+    await run_pipeline(
+        db=database,
+        sources=[FakeSource("test", jobs)],
+        scorer=scorer,
+        embedder=embedder,
+        profile="profile",
+        min_score=0,
+    )
+    result = await run_pipeline(
+        db=database,
+        sources=[FakeSource("test", jobs)],
+        scorer=scorer,
+        embedder=embedder,
+        profile="profile",
+        min_score=0,
+    )
+
+    assert result.stats["embedded"] == 1
+    assert "retry" in result.message

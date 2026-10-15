@@ -9,6 +9,7 @@ from discord.ext import commands, tasks
 from .config import Settings
 from .db import Database
 from .pipeline import PreparedDigest, run_pipeline
+from .retriever import OllamaEmbedder
 from .scoring.ollama import OllamaScorer
 from .sources import (
     ArbeitnowSource,
@@ -39,11 +40,13 @@ class BotService:
         database: Database,
         sources: list,
         scorer: OllamaScorer,
+        embedder: OllamaEmbedder | None = None,
     ) -> None:
         self.settings = settings
         self.database = database
         self.sources = sources
         self.scorer = scorer
+        self.embedder = embedder
         self.run_lock = asyncio.Lock()
         self.last_error: str | None = None
 
@@ -59,6 +62,8 @@ class BotService:
                     profile=self.settings.profile,
                     min_score=self.settings.min_score,
                     serpapi_queries_used=len(self.settings.serpapi_queries),
+                    embedder=self.embedder,
+                    max_to_score=self.settings.max_to_score,
                 )
                 self.last_error = None
                 return result
@@ -89,7 +94,8 @@ class BotService:
                 f"Last run: {run['completed_at'] or run['started_at']} · {run['status']}\n"
                 f"Counts: fetched {run['fetched_count']} · new {run['new_count']} · "
                 f"deduped {run['deduped_count']} · scored {run['scored_count']} · "
-                f"shown {run['shown_count']}\n"
+                f"shown {run['shown_count']} · embedded {run['embedded_count']} · "
+                f"judged {run['judged_count']}\n"
                 f"Source failures: {source_failures} · SerpApi queries: "
                 f"{run['serpapi_queries_used']}"
             )
@@ -121,7 +127,12 @@ def create_bot(settings: Settings, database: Database | None = None) -> commands
         settings.ollama_model,
         settings.ollama_timeout_seconds,
     )
-    service = BotService(settings, database, build_sources(settings), scorer)
+    embedder = OllamaEmbedder(
+        settings.ollama_base_url,
+        settings.embedding_model,
+        settings.ollama_timeout_seconds,
+    )
+    service = BotService(settings, database, build_sources(settings), scorer, embedder)
     intents = discord.Intents.none()
     bot = commands.Bot(command_prefix="!", intents=intents)
 

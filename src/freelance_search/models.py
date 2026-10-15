@@ -22,6 +22,12 @@ class ScoreResult:
 
 
 @dataclass(frozen=True, slots=True)
+class EmbeddingBatchResult:
+    embeddings: dict[str, list[float]]
+    errors: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
 class ScoreBatchResult:
     scores: dict[str, ScoreResult]
     errors: dict[str, str]

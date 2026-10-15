@@ -58,16 +58,19 @@ receives `Run already in progress.`.
 ## Architecture
 
 ```text
-fetch -> dedup -> score -> digest -> deliver
-                                      |
-                                      +-> mark shown only after Discord confirms send
+fetch -> dedup -> retrieve (embeddings) -> rerank (local Gemma) -> digest -> deliver
+                                                                            |
+                                                                            +-> mark shown only after Discord confirms send
 ```
 
 - **Fetch:** SerpApi Google Jobs is primary; RemoteOK, Jobicy, Arbeitnow, and
   We Work Remotely RSS are no-key fallback adapters.
 - **Dedup:** SQLite stores listings and permanently shown IDs/URLs.
-- **Score:** Ollama receives the listing and profile and must return strict JSON
-  with a numeric score from 0–10 and a one-line reason.
+- **Retrieve:** Ollama embeddings compare the profile with each listing's title
+  and description; cosine similarity is persisted without storing vectors.
+- **Rerank:** The highest-similarity candidates are judged by local Gemma,
+  which must return strict JSON with a numeric score from 0–10 and a one-line
+  reason. No listing is dropped by keyword matching.
 - **Digest:** Scores below `MIN_SCORE` are removed; results are sorted
   deterministically, capped at five, and kept below Discord's 2,000-character
   limit.
@@ -83,6 +86,7 @@ src/freelance_search/
 ├── discord_bot.py     # owner-only commands and daily scheduler
 ├── models.py          # normalized listings and result models
 ├── pipeline.py        # fetch -> dedup -> score -> digest orchestration
+├── retriever.py       # batched local embeddings and cosine similarity
 ├── scoring/ollama.py  # local Ollama client and health check
 └── sources/           # SerpApi, JSON API, and RSS adapters
 tests/                 # hermetic tests plus one opt-in live Ollama test
@@ -133,6 +137,14 @@ The service's daily loop is exact for fixed-offset timezones such as IST.
 Timezones with daylight-saving transitions can drift after a DST transition;
 restart the process or adjust the configured time if that matters for your
 location.
+
+## Retrieval tuning
+
+Set `EMBEDDING_MODEL` to the Ollama embedding model you want to use
+(default: `mxbai-embed-large`). `MAX_TO_SCORE` controls how many
+highest-similarity listings reach the slower Gemma judge (default: `30`).
+Embedding and judge results are persisted, so a listing is embedded and judged
+at most once per lifetime unless its database is removed.
 
 ## Scope
 
