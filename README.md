@@ -1,74 +1,143 @@
 # freelance_search
 
-`freelance_search` is a small Windows service that searches for freelance jobs
-matching a personal AI/ML profile once a day and posts a ranked shortlist to
-Discord.
+[![CI](https://github.com/SammySN-car/freelance_search/actions/workflows/ci.yml/badge.svg)](https://github.com/SammySN-car/freelance_search/actions/workflows/ci.yml)
 
-The project is designed around local execution:
+`freelance_search` is a daily freelance scout for an AI/ML engineer: it
+searches SerpApi Google Jobs and free remote-job feeds, scores each new listing
+with a local Ollama Gemma model, and posts a ranked top-five shortlist to
+Discord each morning. A job is persisted as shown only after Discord confirms
+delivery, so the same job is never shown twice.
 
-- SerpApi Google Jobs is the primary source, limited to 3–5 queries per run.
-- RemoteOK, Jobicy, Arbeitnow, and We Work Remotely are no-key fallback sources.
-- Ollama performs scoring locally; no cloud LLM is used.
-- Scoring requires strict JSON with a numeric 0–10 score and one-line reason;
-  malformed or failed requests are recorded as explicit errors.
-- Ollama health checks require the configured model tag to match exactly, so a
-  similarly named or differently tagged model is not reported as available.
-- SQLite permanently records listings shown in a digest.
-- Pipeline preparation never marks listings as shown; the Discord delivery
-  caller marks the returned IDs only after a successful send.
-- The Discord bot is owner-only and does not apply for jobs or write bids.
+## Quickstart
 
-## Setup
-
-1. Install Python 3.11 or newer.
-2. Create a virtual environment:
-
-   ```powershell
-   py -3.11 -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   python -m pip install -e ".[dev]"
-   ```
-
-3. Copy `.env.example` to `.env` and fill in the Discord and SerpApi values.
-4. Confirm Ollama is running locally and that `OLLAMA_MODEL` is available.
-5. Run the test and lint checks:
-
-   ```powershell
-   pytest
-   ruff check .
-   ```
-
-The source adapters are implemented behind one normalized listing interface.
-The source adapters, Ollama scoring client, pipeline, scheduler, and
-owner-only Discord commands are implemented.
-
-## Run the bot
-
-After configuring `.env` and confirming Ollama is running:
+Requirements: Windows, Python 3.11+, and [Ollama](https://ollama.com/) running
+locally.
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+ollama pull gemma3:4b
+Copy-Item .env.example .env
+# Edit .env and fill in the Discord and SerpApi values.
 python -m freelance_search
 ```
 
-The bot schedules one daily run at `DIGEST_TIME` in `DIGEST_TIMEZONE`.
-`/refresh` runs immediately and replies manually; scheduled empty results stay
-quiet. `/status` reports the latest run, source/query counts, Ollama health,
-and scheduler state.
+The default model is `gemma3:4b`. Set `OLLAMA_MODEL` in `.env` to use another
+locally installed model. The default timezone is `Asia/Kolkata` and the
+default digest time is `08:00`.
 
-## Digest behavior
+## Discord setup
 
-The daily message contains at most five ranked listings and stays within
-Discord's 2,000-character message limit. A listing is marked as shown only
-after Discord accepts the digest, so a failed delivery does not consume jobs.
+1. Open the [Discord Developer Portal](https://discord.com/developers/applications)
+   and create an application.
+2. Open **Bot**, create the bot, and copy its token into `DISCORD_TOKEN`.
+3. Enable the bot's **Message Content Intent** only if your Discord server
+   requires it; this project uses slash commands and does not read message
+   content.
+4. Invite the bot to your server with the `bot` and `applications.commands`
+   scopes and permission to view and send messages in the target channel.
+5. In Discord, enable **Developer Mode** under **User Settings → Advanced**.
+6. Right-click your own user and choose **Copy ID** for `DISCORD_OWNER_ID`.
+7. Right-click the destination channel and choose **Copy ID** for
+   `DISCORD_CHANNEL_ID`.
 
-## Live tests
+Keep `.env` private. It is ignored by Git and must never be committed.
 
-Tests that need network access or a local Ollama instance will use the
-`live` pytest marker and are excluded from the default CI run:
+## Commands and delivery
+
+| Command / event | Who | Behavior |
+|---|---|---|
+| `/refresh` | Owner only | Runs the pipeline immediately and replies with the digest, including the empty result. |
+| `/status` | Owner only | Shows the latest run, counts, source failures, SerpApi query usage, Ollama health, and scheduler state. |
+| Scheduled daily digest | Automatic | Runs at `DIGEST_TIME` in `DIGEST_TIMEZONE`; posts nothing when there are no new matching jobs. |
+
+Only one manual or scheduled pipeline can run at a time. A second invocation
+receives `Run already in progress.`.
+
+## Architecture
+
+```text
+fetch -> dedup -> score -> digest -> deliver
+                                      |
+                                      +-> mark shown only after Discord confirms send
+```
+
+- **Fetch:** SerpApi Google Jobs is primary; RemoteOK, Jobicy, Arbeitnow, and
+  We Work Remotely RSS are no-key fallback adapters.
+- **Dedup:** SQLite stores listings and permanently shown IDs/URLs.
+- **Score:** Ollama receives the listing and profile and must return strict JSON
+  with a numeric score from 0–10 and a one-line reason.
+- **Digest:** Scores below `MIN_SCORE` are removed; results are sorted
+  deterministically, capped at five, and kept below Discord's 2,000-character
+  limit.
+- **Deliver:** the prepared message is sent first; only a confirmed send marks
+  its listing IDs as shown.
+
+Project layout:
+
+```text
+src/freelance_search/
+├── config.py          # typed .env settings
+├── db.py              # SQLite schema and persistence
+├── discord_bot.py     # owner-only commands and daily scheduler
+├── models.py          # normalized listings and result models
+├── pipeline.py        # fetch -> dedup -> score -> digest orchestration
+├── scoring/ollama.py  # local Ollama client and health check
+└── sources/           # SerpApi, JSON API, and RSS adapters
+tests/                 # hermetic tests plus one opt-in live Ollama test
+```
+
+## Testing and CI
+
+The default test suite is hermetic: it uses mocked HTTP/source/scoring/Discord
+boundaries and performs zero network requests.
+
+```powershell
+pytest
+ruff check .
+```
+
+The live test requires a running local Ollama instance and is excluded from the
+default suite:
 
 ```powershell
 pytest -m live
 ```
+
+GitHub Actions runs Ruff and the hermetic pytest suite on every push. No cloud
+LLM calls are used by the application or CI.
+
+## SerpApi quota
+
+The SerpApi free tier provides 250 searches per month. The default configuration
+uses approximately three queries per daily run (configurable between three and
+five), keeping the service within the monthly allowance.
+
+## Windows Task Scheduler
+
+The Discord bot contains its own daily loop and is the recommended runtime.
+For start-on-boot and restart-on-crash behavior, create a Windows Task
+Scheduler task:
+
+1. Set **Trigger** to **At startup**.
+2. Set **Action** to start `python.exe` with argument
+   `-m freelance_search`.
+3. Set **Start in** to the repository directory.
+4. Enable **Run whether user is logged on or not** if appropriate.
+5. In **Settings**, enable **Restart the task if it fails** and choose a short
+   restart interval.
+6. Store the real `.env` in the repository directory with user-only access.
+
+The service's daily loop is exact for fixed-offset timezones such as IST.
+Timezones with daylight-saving transitions can drift after a DST transition;
+restart the process or adjust the configured time if that matters for your
+location.
+
+## Scope
+
+This project does not write cover letters or bids, auto-apply to jobs, scrape
+Upwork/Fiverr/LinkedIn, use cloud LLMs, or provide a web UI.
 
 ## License
 
