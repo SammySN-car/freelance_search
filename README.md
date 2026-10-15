@@ -32,8 +32,9 @@ The project is designed around local execution:
    ruff check .
    ```
 
-The application runtime, source adapters, scoring, scheduler, and Discord
-commands are delivered in later milestones.
+The source adapters are implemented behind one normalized listing interface.
+The scoring, scheduler, pipeline orchestration, and Discord commands are
+delivered in later milestones.
 
 ## Digest behavior
 
