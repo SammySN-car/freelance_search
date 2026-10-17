@@ -5,10 +5,13 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import discord
+import httpx
 from discord.ext import commands, tasks
 
 from .config import Settings, compose_profile
 from .db import Database
+from .github_analysis import GithubAnalyzer, GithubError
+from .models import GithubVerdict
 from .pipeline import PreparedDigest, run_pipeline
 from .retriever import OllamaEmbedder
 from .scoring.ollama import OllamaScorer
@@ -89,20 +92,66 @@ class BotService:
         self.run_lock = asyncio.Lock()
         self.last_error: str | None = None
         self.discord_channel_name: str | None = None
+        self.github_verdict: GithubVerdict | None = None
+        self.github_source: str = "unset"
 
     def set_discord_channel(self, channel: object | None) -> None:
         self.discord_channel_name = getattr(channel, "name", None) if channel else None
+
+    def _github_is_fresh(self, verdict: GithubVerdict) -> bool:
+        try:
+            analyzed = datetime.fromisoformat(verdict.analyzed_at)
+        except ValueError:
+            return False
+        age_days = (datetime.now() - analyzed).total_seconds() / 86400
+        return age_days < self.settings.github_refresh_days
+
+    async def resolve_github_verdict(self) -> GithubVerdict | None:
+        """GitHub verdict with cache; refresh at most once per github_refresh_days."""
+        url = self.settings.github_url.strip()
+        if not url:
+            self.github_source = "unset"
+            self.github_verdict = None
+            return None
+        cached = self.database.get_github_verdict()
+        if cached is not None and self._github_is_fresh(cached):
+            self.github_source = "cache"
+            self.github_verdict = cached
+            return cached
+        analyzer = GithubAnalyzer(
+            url,
+            self.settings.ollama_base_url,
+            self.settings.ollama_model,
+            self.settings.ollama_timeout_seconds,
+        )
+        try:
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                verdict = await analyzer.analyze(client)
+        except (GithubError, httpx.HTTPError, TimeoutError, OSError) as exc:
+            LOGGER.warning("GitHub analysis failed, falling back: %s", exc)
+            if cached is not None:
+                self.github_source = "cache (refresh failed)"
+                self.github_verdict = cached
+                return cached
+            self.github_source = "failed"
+            self.github_verdict = None
+            return None
+        self.database.save_github_verdict(verdict)
+        self.github_source = "fresh"
+        self.github_verdict = verdict
+        return verdict
 
     async def run(self) -> PreparedDigest | None:
         if self.run_lock.locked():
             return None
         async with self.run_lock:
             try:
+                github = await self.resolve_github_verdict()
                 result = await run_pipeline(
                     db=self.database,
                     sources=self.sources,
                     scorer=self.scorer,
-                    profile=compose_profile(self.settings),
+                    profile=compose_profile(self.settings, github),
                     min_score=self.settings.min_score,
                     serpapi_queries_used=len(self.settings.serpapi_queries),
                     embedder=self.embedder,
@@ -158,6 +207,17 @@ class BotService:
                 "Discord channel: NOT FOUND — fix DISCORD_CHANNEL_ID "
                 "(see startup log)"
             )
+        if self.github_source == "unset":
+            level = self.settings.experience_level or "unset"
+            github_line = f"GitHub: not configured · level {level} (manual)"
+        elif self.github_verdict is not None:
+            github_line = (
+                f"GitHub: {self.github_verdict.level} from "
+                f"{self.github_verdict.repos_total} repos ({self.github_source}) · "
+                f"{self.github_verdict.summary}"
+            )
+        else:
+            github_line = "GitHub: analysis failed · using manual level"
         customization = (
             f"Customization: level {self.settings.experience_level or 'unset'} · "
             f"location {self.settings.location or 'unset'} · "
@@ -166,7 +226,7 @@ class BotService:
         )
         return (
             f"{run_summary}\n{health_summary}\n{channel_summary}\n"
-            f"{customization}\nScheduler: {scheduler_state}"
+            f"{github_line}\n{customization}\nScheduler: {scheduler_state}"
         )
 
 

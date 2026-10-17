@@ -64,3 +64,32 @@ def test_database_migrates_old_schema_with_retrieval_and_judge_columns(tmp_path)
         run_columns = {row["name"] for row in connection.execute("PRAGMA table_info(runs)")}
     assert {"similarity", "embedded_at", "score", "score_reason", "judged_at"} <= listing_columns
     assert {"embedded_count", "judged_count", "embedding_errors"} <= run_columns
+
+
+def test_github_verdict_round_trip(database):
+    from freelance_search.models import GithubVerdict
+
+    assert database.get_github_verdict() is None
+
+    verdict = GithubVerdict(
+        level="beginner",
+        summary="cited demo repo",
+        repos_total=14,
+        repos_read=11,
+        analyzed_at="2026-10-17T10:00:00",
+    )
+    database.save_github_verdict(verdict)
+
+    loaded = database.get_github_verdict()
+    assert loaded == verdict
+
+    replacement = GithubVerdict(
+        level="intermediate",
+        summary="grew since last check",
+        repos_total=15,
+        repos_read=15,
+        analyzed_at="2026-10-19T10:00:00",
+    )
+    database.save_github_verdict(replacement)
+
+    assert database.get_github_verdict() == replacement

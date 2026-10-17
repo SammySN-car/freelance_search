@@ -38,7 +38,8 @@ details each person puts in their own `.env`:
 |---|---|
 | `PROFILE` | Free text: your skills, what you want, and `SKIP:` lines for what you never want. Embedded for ranking and shown to the judge. |
 | `LOCATION` | Your location. Added to every Google Jobs query (SerpApi's native `location` parameter) and tells the judge to down-rank roles that require being on-site somewhere else. Leave empty for worldwide/remote-only. |
-| `EXPERIENCE_LEVEL` | e.g. `beginner`, `student`, `senior`. The judge scores opportunities that fit this level higher and roles demanding senior expertise lower. |
+| `EXPERIENCE_LEVEL` | e.g. `beginner`, `student`, `senior`. Used only when `GITHUB_URL` is empty. The judge scores opportunities that fit this level higher and roles demanding senior expertise lower. |
+| `GITHUB_URL` | Optional GitHub profile. The tool downloads your actual code and has the local model detect your level from it — no typed label. Re-checked every `GITHUB_REFRESH_DAYS` (default 2) and cached in the database; falls back to `EXPERIENCE_LEVEL` when empty or unreachable. |
 | `SERPAPI_QUERIES` | 3–8 JSON-quoted search strings. Mix freelance, internship, and job queries for your field. |
 | `DIGEST_SIZE` | How many links appear per digest (1–40, default 25). |
 | `MAX_TO_SCORE` | How many highest-similarity listings reach the local judge per run (default 50). |
@@ -118,6 +119,24 @@ src/freelance_search/
 └── sources/           # SerpApi, JSON API, and RSS adapters
 tests/                 # hermetic tests plus one opt-in live Ollama test
 ```
+
+## GitHub level detection
+
+Instead of typing an experience level, point `GITHUB_URL` at your profile. Every
+`GITHUB_REFRESH_DAYS` (default: 2) the tool:
+
+1. lists all your public repos (GitHub's free API, no token needed),
+2. downloads each repo's source archive and extracts real code files
+   (forks and empty repos skipped; ~400 lines per repo, whole batch capped to
+   what the local model can hold, newest repos first),
+3. asks the local model to read the code and name a level, citing specific
+   repos/files as evidence.
+
+The verdict (level + 2-line evidence summary) is cached in the database and
+becomes part of the profile the job judge scores against. Between checks it is
+read from cache. If GitHub is unreachable, the last cached verdict is used; if
+there is none, `EXPERIENCE_LEVEL` applies. `/status` shows which source is
+active and what the verdict was.
 
 ## Testing and CI
 

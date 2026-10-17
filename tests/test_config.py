@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from freelance_search.config import Settings, compose_profile
+from freelance_search.models import GithubVerdict
 
 
 def make_settings(**overrides):
@@ -73,6 +74,48 @@ def test_compose_profile_handles_whitespace_only_values():
     assert compose_profile(settings) == "Python dev."
 
 
+def test_compose_profile_prefers_github_verdict_over_typed_level():
+    settings = make_settings(
+        profile="Python dev.",
+        experience_level="senior",
+        github_url="https://github.com/octocat",
+    )
+    verdict = GithubVerdict(
+        level="beginner",
+        summary="course projects in demo.py; no production code yet",
+        repos_total=12,
+        repos_read=12,
+        analyzed_at="2026-10-17T10:00:00",
+    )
+
+    composed = compose_profile(settings, verdict)
+
+    detected = "Candidate experience level: beginner (detected by reading their GitHub code)"
+    assert detected in composed
+    assert "course projects in demo.py" in composed
+    assert "senior" not in composed
+
+
+def test_compose_profile_without_verdict_uses_typed_level():
+    settings = make_settings(profile="Python dev.", experience_level="senior")
+
+    composed = compose_profile(settings, None)
+
+    assert "Candidate experience level: senior" in composed
+
+
+def test_github_settings_defaults():
+    settings = make_settings()
+
+    assert settings.github_url == ""
+    assert settings.github_refresh_days == 2
+
+
+def test_settings_validate_github_refresh_days():
+    with pytest.raises(ValidationError):
+        make_settings(github_refresh_days=0)
+
+
 def test_settings_loads_example_dotenv_queries(tmp_path):
     dotenv = tmp_path / ".env.example"
     example = Path(__file__).parents[1] / ".env.example"
@@ -91,3 +134,5 @@ def test_settings_loads_example_dotenv_queries(tmp_path):
     assert settings.max_to_score == 50
     assert settings.location == ""
     assert settings.experience_level == "beginner"
+    assert settings.github_url == ""
+    assert settings.github_refresh_days == 2

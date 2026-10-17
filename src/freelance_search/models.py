@@ -38,3 +38,12 @@ class OllamaHealth:
     reachable: bool
     model_present: bool
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GithubVerdict:
+    level: str
+    summary: str
+    repos_total: int
+    repos_read: int
+    analyzed_at: str

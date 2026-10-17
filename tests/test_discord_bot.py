@@ -13,7 +13,13 @@ from freelance_search.discord_bot import (
     next_digest_at,
     refresh_ack,
 )
-from freelance_search.models import Listing, OllamaHealth, ScoreBatchResult
+from freelance_search.github_analysis import GithubError
+from freelance_search.models import (
+    GithubVerdict,
+    Listing,
+    OllamaHealth,
+    ScoreBatchResult,
+)
 from freelance_search.pipeline import PreparedDigest
 
 
@@ -282,6 +288,150 @@ async def test_status_contains_run_counts_query_count_and_ollama_health(database
 
     service.set_discord_channel(type("Channel", (), {"name": "jobs"})())
     assert "Discord channel: OK (#jobs)" in service.status_message("running")
+
+
+def make_service(database, **overrides):
+    return BotService(make_settings(**overrides), database, [Source()], Scorer())
+
+
+@pytest.mark.asyncio
+async def test_no_github_url_uses_manual_level(database):
+    service = make_service(database, experience_level="beginner")
+
+    verdict = await service.resolve_github_verdict()
+
+    assert verdict is None
+    assert service.github_source == "unset"
+    assert "not configured" in service.status_message("stopped")
+
+
+@pytest.mark.asyncio
+async def test_fresh_cache_skips_network(database):
+    import freelance_search.discord_bot as discord_bot
+
+    service = make_service(database, github_url="https://github.com/octocat")
+    from datetime import datetime
+
+    database.save_github_verdict(
+        GithubVerdict("beginner", "cached summary", 5, 5, datetime.now().isoformat())
+    )
+
+    def explode(*args, **kwargs):
+        raise AssertionError("network should not be touched")
+
+    original = discord_bot.GithubAnalyzer
+    discord_bot.GithubAnalyzer = explode
+    try:
+        verdict = await service.resolve_github_verdict()
+    finally:
+        discord_bot.GithubAnalyzer = original
+
+    assert verdict.summary == "cached summary"
+    assert service.github_source == "cache"
+
+
+@pytest.mark.asyncio
+async def test_stale_cache_triggers_refresh_and_saves(database):
+    import freelance_search.discord_bot as discord_bot
+
+    service = make_service(database, github_url="https://github.com/octocat")
+    from datetime import datetime, timedelta
+
+    database.save_github_verdict(
+        GithubVerdict(
+            "beginner", "old", 5, 5, (datetime.now() - timedelta(days=5)).isoformat()
+        )
+    )
+
+    class FakeAnalyzer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def analyze(self, client):
+            return GithubVerdict("intermediate", "new verdict", 9, 9, datetime.now().isoformat())
+
+    original = discord_bot.GithubAnalyzer
+    discord_bot.GithubAnalyzer = FakeAnalyzer
+    try:
+        verdict = await service.resolve_github_verdict()
+    finally:
+        discord_bot.GithubAnalyzer = original
+
+    assert verdict.level == "intermediate"
+    assert service.github_source == "fresh"
+    assert database.get_github_verdict().summary == "new verdict"
+
+
+@pytest.mark.asyncio
+async def test_failed_refresh_falls_back_to_cached_verdict(database):
+    import freelance_search.discord_bot as discord_bot
+
+    service = make_service(database, github_url="https://github.com/octocat")
+    from datetime import datetime, timedelta
+
+    database.save_github_verdict(
+        GithubVerdict(
+            "beginner", "old but usable", 5, 5, (datetime.now() - timedelta(days=9)).isoformat()
+        )
+    )
+
+    class BrokenAnalyzer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def analyze(self, client):
+            raise GithubError("rate limited")
+
+    original = discord_bot.GithubAnalyzer
+    discord_bot.GithubAnalyzer = BrokenAnalyzer
+    try:
+        verdict = await service.resolve_github_verdict()
+    finally:
+        discord_bot.GithubAnalyzer = original
+
+    assert verdict.summary == "old but usable"
+    assert "cache" in service.github_source
+
+
+@pytest.mark.asyncio
+async def test_failed_refresh_without_cache_uses_manual_level(database):
+    import freelance_search.discord_bot as discord_bot
+
+    service = make_service(
+        database, github_url="https://github.com/octocat", experience_level="beginner"
+    )
+
+    class BrokenAnalyzer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def analyze(self, client):
+            raise GithubError("down")
+
+    original = discord_bot.GithubAnalyzer
+    discord_bot.GithubAnalyzer = BrokenAnalyzer
+    try:
+        verdict = await service.resolve_github_verdict()
+    finally:
+        discord_bot.GithubAnalyzer = original
+
+    assert verdict is None
+    assert service.github_source == "failed"
+
+
+@pytest.mark.asyncio
+async def test_status_shows_github_verdict_line(database):
+    service = make_service(database, github_url="https://github.com/octocat")
+    from datetime import datetime
+
+    service.github_source = "cache"
+    service.github_verdict = GithubVerdict(
+        "beginner", "cited demo repo", 14, 11, datetime.now().isoformat()
+    )
+
+    message = service.status_message("stopped")
+
+    assert "GitHub: beginner from 14 repos (cache) · cited demo repo" in message
 
 
 def test_status_shows_customization_line(database):

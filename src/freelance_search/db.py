@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 
-from .models import Listing, ScoreResult
+from .models import GithubVerdict, Listing, ScoreResult
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS listings (
@@ -28,6 +28,15 @@ CREATE TABLE IF NOT EXISTS listings (
 CREATE TABLE IF NOT EXISTS shown_listings (
     listing_id TEXT PRIMARY KEY REFERENCES listings(listing_id),
     shown_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS github_profile (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    level TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    repos_total INTEGER NOT NULL,
+    repos_read INTEGER NOT NULL,
+    analyzed_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -278,3 +287,41 @@ class Database:
             return connection.execute(
                 "SELECT * FROM runs ORDER BY run_id DESC LIMIT 1"
             ).fetchone()
+
+    def save_github_verdict(self, verdict: GithubVerdict) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO github_profile
+                    (id, level, summary, repos_total, repos_read, analyzed_at)
+                VALUES (1, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    level = excluded.level,
+                    summary = excluded.summary,
+                    repos_total = excluded.repos_total,
+                    repos_read = excluded.repos_read,
+                    analyzed_at = excluded.analyzed_at
+                """,
+                (
+                    verdict.level,
+                    verdict.summary,
+                    verdict.repos_total,
+                    verdict.repos_read,
+                    verdict.analyzed_at,
+                ),
+            )
+
+    def get_github_verdict(self) -> GithubVerdict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM github_profile WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return GithubVerdict(
+            level=row["level"],
+            summary=row["summary"],
+            repos_total=row["repos_total"],
+            repos_read=row["repos_read"],
+            analyzed_at=row["analyzed_at"],
+        )

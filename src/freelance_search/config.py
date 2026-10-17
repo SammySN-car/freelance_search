@@ -4,6 +4,8 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .models import GithubVerdict
+
 DEFAULT_PROFILE = (
     "Example profile - replace with your own: skills, stack, what kind of work you "
     "want (freelance, internship, junior role), and what to skip "
@@ -30,6 +32,8 @@ class Settings(BaseSettings):
     min_score: float = Field(default=5.0, ge=0, le=10)
     location: str = ""
     experience_level: str = ""
+    github_url: str = ""
+    github_refresh_days: int = Field(default=2, ge=1)
     serpapi_queries: list[str] = Field(
         default_factory=lambda: [
             "AI automation freelance",
@@ -62,8 +66,13 @@ class Settings(BaseSettings):
         return value
 
 
-def compose_profile(settings: Settings) -> str:
-    """Combine the free-text profile with the structured customization settings."""
+def compose_profile(
+    settings: Settings, github: GithubVerdict | None = None
+) -> str:
+    """Combine the free-text profile with location and experience evidence.
+
+    A GitHub verdict, when available, replaces the hand-typed EXPERIENCE_LEVEL.
+    """
     parts = [settings.profile.strip()]
     location = settings.location.strip()
     if location:
@@ -73,7 +82,12 @@ def compose_profile(settings: Settings) -> str:
             "being on-site somewhere else."
         )
     level = settings.experience_level.strip()
-    if level:
+    if github is not None:
+        parts.append(
+            f"Candidate experience level: {github.level} (detected by reading their "
+            f"GitHub code). Evidence: {github.summary}"
+        )
+    elif level:
         parts.append(
             f"Candidate experience level: {level}. Prefer opportunities that fit this "
             "level; score lower roles demanding senior or lead expertise."
