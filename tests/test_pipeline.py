@@ -509,3 +509,91 @@ async def test_pipeline_without_location_keeps_everything(database):
 
     assert len(scorer.calls[0]) == 2
     assert result.stats["location_filtered"] == 0
+
+
+def test_seniority_filter_drops_senior_titles_only_for_junior_levels():
+    from freelance_search.pipeline import filter_by_seniority
+
+    jobs = [
+        listing("1", "Python Developer"),
+        listing("2", "Senior Python Developer"),
+        listing("3", "Staff Software Engineer"),
+        listing("4", "Lead Solutions Architect"),
+        listing("5", "Principal Data Scientist"),
+        listing("6", "Senior Director, Consulting"),
+        listing("7", "Head of Growth"),
+        listing("8", "Engineer - senior systems"),  # mid-word senior still matches \b
+    ]
+
+    intermediate = filter_by_seniority(jobs, "intermediate")
+    beginner = filter_by_seniority(jobs, "beginner")
+    senior = filter_by_seniority(jobs, "senior")
+    unconfigured = filter_by_seniority(jobs, "")
+
+    assert [item.listing_id for item in intermediate] == ["1"]
+    assert [item.listing_id for item in beginner] == ["1"]
+    assert len(senior) == len(jobs)
+    assert len(unconfigured) == len(jobs)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_drops_senior_titles_and_counts_them(database):
+    from dataclasses import replace
+
+    jobs = [
+        listing("1", "Mid Python Dev", "OkCo"),
+        listing("2", "Senior Python Dev", "ProCo"),
+        listing("3", "Staff Engineer", "ProCo2"),
+    ]
+    jobs = [replace(job, company=f"Co{n}") for n, job in enumerate(jobs, 1)]
+    scorer = FakeScorer({job.listing_id: ScoreResult(9, "r") for job in jobs})
+
+    result = await run_pipeline(
+        db=database,
+        sources=[FakeSource("fake", jobs)],
+        scorer=scorer,
+        profile="Python dev",
+        min_score=1,
+        experience_level="intermediate",
+    )
+
+    assert scorer.calls[0] == ["1"]
+    assert result.stats["seniority_filtered"] == 2
+
+
+@pytest.mark.asyncio
+async def test_pipeline_keeps_senior_titles_at_senior_level(database):
+    jobs = [
+        listing("1", "Mid Python Dev", "OkCo"),
+        listing("2", "Senior Python Dev", "ProCo"),
+    ]
+    scorer = FakeScorer({job.listing_id: ScoreResult(9, "r") for job in jobs})
+
+    result = await run_pipeline(
+        db=database,
+        sources=[FakeSource("fake", jobs)],
+        scorer=scorer,
+        profile="Python dev",
+        min_score=1,
+        experience_level="senior",
+    )
+
+    assert sorted(scorer.calls[0]) == ["1", "2"]
+    assert result.stats["seniority_filtered"] == 0
+
+
+@pytest.mark.asyncio
+async def test_source_errors_include_exception_class(database):
+    class EmptyMessage(RuntimeError):
+        def __str__(self):
+            return ""
+
+    result = await run_pipeline(
+        db=database,
+        sources=[FakeSource("broken", error=EmptyMessage())],
+        scorer=FakeScorer({}, {}),
+        profile="p",
+        min_score=1,
+    )
+
+    assert result.source_errors["broken"] == "EmptyMessage: no detail"

@@ -44,6 +44,7 @@ async def test_valid_ollama_response_is_strictly_parsed():
         "not json",
         '{"score": 11, "reason": "Too high"}',
         '{"score": "9/10", "reason": "String score"}',
+        '{"score": "high", "reason": "Not a number at all"}',
     ],
 )
 @respx.mock
@@ -139,3 +140,18 @@ async def test_live_ollama_scoring():
 
     assert result.errors == {}
     assert 0 <= result.scores["test:1"].score <= 10
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_quoted_numeric_score_is_accepted():
+    respx.post(f"http://ollama.test{GENERATE_PATH}").mock(
+        return_value=httpx.Response(
+            200, json={"response": '{"score": "7", "reason": "Decent fit"}'}
+        )
+    )
+
+    result = await scorer().score_many([LISTING], PROFILE)
+
+    assert result.scores[LISTING.listing_id].score == 7.0
+    assert result.errors == {}

@@ -1,3 +1,4 @@
+import re
 from collections.abc import Iterable, Sequence
 from datetime import date, datetime
 from urllib.parse import urlsplit, urlunsplit
@@ -126,6 +127,22 @@ def filter_by_location(listings: Iterable[Listing], location: str) -> list[Listi
     return kept
 
 
+SENIORITY_TITLES = re.compile(
+    r"\b(senior|staff|lead|principal|director|head)\b", re.IGNORECASE
+)
+JUNIOR_LEVELS = {"beginner", "intermediate"}
+
+
+def filter_by_seniority(listings: Iterable[Listing], level: str) -> list[Listing]:
+    """Hard-drop senior-titled roles while the active level is below senior.
+
+    Title keywords only; descriptions are untouched. Empty or senior level keeps all.
+    """
+    if level.strip().casefold() not in JUNIOR_LEVELS:
+        return list(listings)
+    return [listing for listing in listings if not SENIORITY_TITLES.search(listing.title)]
+
+
 def clean_url(url: str) -> str:
     """Strip tracking parameters and fragments so links stay short and stable."""
     try:
@@ -219,6 +236,7 @@ async def run_pipeline(
     serpapi_queries_used: int = 0,
     embedder: PipelineEmbedder | None = None,
     location: str = "",
+    experience_level: str = "",
     max_to_score: int = 50,
     digest_size: int = 25,
     score_model: str = "gemma3:4b",
@@ -228,7 +246,7 @@ async def run_pipeline(
     source_errors: dict[str, str] = {}
     fetched: list[Listing] = []
     own_client = client is None
-    request_client = client or httpx.AsyncClient()
+    request_client = client or httpx.AsyncClient(timeout=30.0)
     try:
         for source in sources:
             try:
@@ -237,11 +255,15 @@ async def run_pipeline(
                 fetched.extend(listings)
             except (httpx.HTTPError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
                 source_stats[source.name] = {"fetched": 0, "failed": 1}
-                source_errors[source.name] = str(exc)
+                detail = str(exc).strip() or "no detail"
+                source_errors[source.name] = f"{type(exc).__name__}: {detail}"
 
         pre_filter = len(fetched)
         fetched = filter_by_location(fetched, location)
         location_dropped = pre_filter - len(fetched)
+        pre_seniority = len(fetched)
+        fetched = filter_by_seniority(fetched, experience_level)
+        seniority_dropped = pre_seniority - len(fetched)
         unique_listings = _identity_deduplicate(fetched)
         db.save_listings(unique_listings)
         unshown_ids = db.unshown_listing_ids(listing.listing_id for listing in unique_listings)
@@ -312,6 +334,8 @@ async def run_pipeline(
         )
         if location_dropped:
             footer += f" · location-filtered: {location_dropped}"
+        if seniority_dropped:
+            footer += f" · seniority-filtered: {seniority_dropped}"
         if source_errors:
             footer += f" · source errors: {len(source_errors)}"
         if batch.errors:
@@ -366,6 +390,7 @@ async def run_pipeline(
                 "sources": len(source_stats),
                 "fetched": len(fetched),
                 "location_filtered": location_dropped,
+                "seniority_filtered": seniority_dropped,
                 "new": len(new_listings),
                 "deduped": deduped_count,
                 "scored": len(batch.scores),

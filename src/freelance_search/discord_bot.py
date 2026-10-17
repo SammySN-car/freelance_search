@@ -147,11 +147,15 @@ class BotService:
         async with self.run_lock:
             try:
                 github = await self.resolve_github_verdict()
+                active_level = (
+                    github.level if github is not None else self.settings.experience_level
+                )
                 result = await run_pipeline(
                     db=self.database,
                     sources=self.sources,
                     scorer=self.scorer,
                     profile=compose_profile(self.settings, github),
+                    experience_level=active_level,
                     min_score=self.settings.min_score,
                     serpapi_queries_used=len(self.settings.serpapi_queries),
                     embedder=self.embedder,

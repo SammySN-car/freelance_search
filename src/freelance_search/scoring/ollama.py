@@ -36,6 +36,12 @@ def _validate_score(payload: Any, listing_id: str) -> ScoreResult:
         raise ScoringError(f"{listing_id}: response must be a JSON object")
     score = payload.get("score")
     reason = payload.get("reason")
+    if isinstance(score, str):
+        # gemma sometimes quotes numbers despite the prompt; accept clean numerics
+        try:
+            score = float(score.strip())
+        except ValueError:
+            pass
     if isinstance(score, bool) or not isinstance(score, (int, float)):
         raise ScoringError(f"{listing_id}: score must be a JSON number")
     if not 0 <= score <= 10:
