@@ -1,5 +1,4 @@
 import io
-import json
 import logging
 import tarfile
 from datetime import datetime
@@ -190,31 +189,31 @@ async def build_code_digest(
     return "\n\n".join(parts), repos_read
 
 
+# Instruction goes AFTER the code: with a large code context, gemma3:4b follows
+# recency and ignores format rules placed before it (verified locally).
 GITHUB_PROMPT = (
-    "You are assessing a developer's demonstrated coding level by reading their actual code.\n"
-    'Return exactly one JSON object: {"level": "beginner|intermediate|senior", '
-    '"summary": "<max 2 lines citing at least two specific repos or files as evidence>"}.\n'
-    "Judge only what the code demonstrates: completeness, structure, testing, and complexity. "
-    "Ignore stars and popularity. No markdown, no extra keys.\n\nCODE:\n{code}"
+    "CODE:\n{code}\n\n"
+    "Now answer based ONLY on the code above, output exactly two lines:\n"
+    "Level: beginner|intermediate|senior\n"
+    "Evidence: <one line citing at least two specific repo or file names as proof>\n"
+    "Judge what the code demonstrates: completeness, structure, testing, and complexity. "
+    "Ignore stars and popularity. Output only those two lines, nothing else."
 )
 
 
 def parse_verdict(raw: str) -> dict[str, str]:
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end <= start:
-        raise GithubError("verdict was not JSON")
-    try:
-        payload = json.loads(text[start : end + 1])
-    except json.JSONDecodeError as exc:
-        raise GithubError(f"verdict JSON invalid: {exc}") from exc
-    level = str(payload.get("level", "")).strip().lower()
+    """Read the two-line Level:/Evidence: verdict; ignore echoed prompt fragments."""
+    level = ""
+    summary = ""
+    for line in raw.splitlines():
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if lowered.startswith("level:") and not level:
+            level = stripped.split(":", 1)[1].strip().rstrip(".").lower()
+        elif lowered.startswith("evidence:") and not summary:
+            summary = stripped.split(":", 1)[1].strip()
     if level not in VALID_LEVELS:
         raise GithubError(f"verdict level invalid: {level!r}")
-    summary = str(payload.get("summary", "")).strip()
     if not summary:
         raise GithubError("verdict summary missing")
     return {"level": level, "summary": summary[:240]}
@@ -234,7 +233,6 @@ async def judge_code(
                 "model": model,
                 "prompt": GITHUB_PROMPT.replace("{code}", code_digest),
                 "stream": False,
-                "format": "json",
                 "options": {"temperature": 0},
             },
             timeout=timeout_seconds,
@@ -265,9 +263,15 @@ class GithubAnalyzer:
         if not repos:
             raise GithubError(f"no usable public repos for {username}")
         digest, repos_read = await build_code_digest(client, username, repos)
-        verdict = await judge_code(
-            client, self.ollama_base_url, self.model, self.timeout_seconds, digest
-        )
+        try:
+            verdict = await judge_code(
+                client, self.ollama_base_url, self.model, self.timeout_seconds, digest
+            )
+        except GithubError as exc:
+            LOGGER.warning("verdict unparseable (%s); retrying once", exc)
+            verdict = await judge_code(
+                client, self.ollama_base_url, self.model, self.timeout_seconds, digest
+            )
         return GithubVerdict(
             level=verdict["level"],
             summary=verdict["summary"],

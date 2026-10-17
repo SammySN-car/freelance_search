@@ -97,17 +97,35 @@ def test_extract_repo_code_caps_repo_lines():
     assert code.count("x = 1") <= 400
 
 
-def test_parse_verdict_valid_and_fenced():
-    assert parse_verdict('{"level": "beginner", "summary": "cited repos"}') == {
+def test_parse_verdict_two_line_format():
+    raw = "Level: beginner\nEvidence: cited repo-a/main.py and repo-b/index.js"
+    assert parse_verdict(raw) == {
         "level": "beginner",
-        "summary": "cited repos",
+        "summary": "cited repo-a/main.py and repo-b/index.js",
     }
-    fenced = '```json\n{"level": "Senior", "summary": "ok"}\n```'
-    assert parse_verdict(fenced)["level"] == "senior"
+    assert parse_verdict("Level: Senior.\nEvidence: ok")["level"] == "senior"
+
+
+def test_parse_verdict_ignores_echoed_prompt_fragments():
+    raw = (
+        "Level: intermediate\n"
+        "Evidence: solid FastAPI routers in app.py\n"
+        "Level: beginner|intermediate|senior\n"
+        "Judge what the code demonstrates - completeness, structure."
+    )
+    verdict = parse_verdict(raw)
+
+    assert verdict["level"] == "intermediate"
+    assert verdict["summary"] == "solid FastAPI routers in app.py"
 
 
 def test_parse_verdict_rejects_bad_payloads():
-    for raw in ("not json", '{"level": "wizard", "summary": "x"}', '{"level": "beginner"}'):
+    for raw in (
+        "no labels at all",
+        "Level: wizard\nEvidence: x",
+        "Level: beginner",
+        "",
+    ):
         with pytest.raises(GithubError):
             parse_verdict(raw)
 
@@ -190,8 +208,10 @@ async def test_analyzer_returns_verdict_end_to_end():
         return_value=httpx.Response(
             200,
             json={
-                "response": '{"level": "beginner", '
-                '"summary": "simple scripts in demo/main.py; small scope overall"}'
+                "response": (
+                    "Level: beginner\n"
+                    "Evidence: simple scripts in demo/main.py; small scope overall"
+                )
             },
         )
     )
