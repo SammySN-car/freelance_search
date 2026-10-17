@@ -93,7 +93,8 @@ def test_compose_profile_prefers_github_verdict_over_typed_level():
     detected = "Candidate experience level: beginner (detected by reading their GitHub code)"
     assert detected in composed
     assert "course projects in demo.py" in composed
-    assert "senior" not in composed
+    assert "Candidate experience level: senior" not in composed
+    assert "score lower roles demanding senior" in composed
 
 
 def test_compose_profile_without_verdict_uses_typed_level():

@@ -85,7 +85,9 @@ def compose_profile(
     if github is not None:
         parts.append(
             f"Candidate experience level: {github.level} (detected by reading their "
-            f"GitHub code). Evidence: {github.summary}"
+            f"GitHub code). Evidence: {github.summary} Prefer opportunities that fit "
+            "this level; score lower roles demanding senior, lead, or principal "
+            "expertise."
         )
     elif level:
         parts.append(

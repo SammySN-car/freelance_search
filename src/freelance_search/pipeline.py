@@ -79,19 +79,51 @@ def _sort_key(item: tuple[Listing, ScoreResult]) -> tuple[float, str, str, str]:
     return (-score.score, listing.title.casefold(), listing.company.casefold(), listing.listing_id)
 
 
+def _normalize_identity(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def _title_key(listing: Listing) -> tuple[str, str]:
+    return (_normalize_identity(listing.title), _normalize_identity(listing.company))
+
+
 def _identity_deduplicate(listings: Iterable[Listing]) -> list[Listing]:
+    """Collapse the same job arriving twice: by id, by URL, or by title+company."""
     selected: dict[str, Listing] = {}
     id_by_url: dict[str, str] = {}
+    id_by_title: dict[tuple[str, str], str] = {}
     for listing in listings:
-        previous_by_id = selected.pop(listing.listing_id, None)
-        if previous_by_id is not None:
-            id_by_url.pop(previous_by_id.url, None)
-        previous_id = id_by_url.pop(listing.url, None)
-        if previous_id is not None:
-            selected.pop(previous_id, None)
+        title_key = _title_key(listing)
+        collisions = (
+            listing.listing_id,
+            id_by_url.get(listing.url, ""),
+            id_by_title.get(title_key, ""),
+        )
+        for previous_id in collisions:
+            previous = selected.pop(previous_id, None) if previous_id else None
+            if previous is not None:
+                id_by_url.pop(previous.url, None)
+                id_by_title.pop(_title_key(previous), None)
         selected[listing.listing_id] = listing
         id_by_url[listing.url] = listing.listing_id
+        id_by_title[title_key] = listing.listing_id
     return list(selected.values())
+
+
+def filter_by_location(listings: Iterable[Listing], location: str) -> list[Listing]:
+    """Hard-drop listings that state a different location than the wanted one.
+
+    Listings with no stated location, or marked remote, always pass.
+    """
+    wanted = location.strip().casefold()
+    if not wanted:
+        return list(listings)
+    kept: list[Listing] = []
+    for listing in listings:
+        stated = (listing.location or "").strip().casefold()
+        if not stated or "remote" in stated or wanted in stated:
+            kept.append(listing)
+    return kept
 
 
 def clean_url(url: str) -> str:
@@ -186,6 +218,7 @@ async def run_pipeline(
     client: httpx.AsyncClient | None = None,
     serpapi_queries_used: int = 0,
     embedder: PipelineEmbedder | None = None,
+    location: str = "",
     max_to_score: int = 50,
     digest_size: int = 25,
     score_model: str = "gemma3:4b",
@@ -206,6 +239,9 @@ async def run_pipeline(
                 source_stats[source.name] = {"fetched": 0, "failed": 1}
                 source_errors[source.name] = str(exc)
 
+        pre_filter = len(fetched)
+        fetched = filter_by_location(fetched, location)
+        location_dropped = pre_filter - len(fetched)
         unique_listings = _identity_deduplicate(fetched)
         db.save_listings(unique_listings)
         unshown_ids = db.unshown_listing_ids(listing.listing_id for listing in unique_listings)
@@ -274,6 +310,8 @@ async def run_pipeline(
             f"sources {len(source_stats)} · fetched {len(fetched)} · new {len(new_listings)} · "
             f"judged {judged_count}"
         )
+        if location_dropped:
+            footer += f" · location-filtered: {location_dropped}"
         if source_errors:
             footer += f" · source errors: {len(source_errors)}"
         if batch.errors:
@@ -327,6 +365,7 @@ async def run_pipeline(
             stats={
                 "sources": len(source_stats),
                 "fetched": len(fetched),
+                "location_filtered": location_dropped,
                 "new": len(new_listings),
                 "deduped": deduped_count,
                 "scored": len(batch.scores),

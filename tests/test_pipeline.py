@@ -438,3 +438,74 @@ async def test_embedding_failure_keeps_listing_for_next_run(database):
 
     assert result.stats["embedded"] == 1
     assert "retry" in all_descriptions(result.embeds)
+
+def test_dedup_collapses_same_title_and_company_across_urls():
+    from freelance_search.pipeline import _identity_deduplicate
+
+    first = listing("a", "Senior AI Engineer - Freelance", "Mirakl - Labs", url="https://x/1")
+    second = listing(
+        "b", "senior  ai engineer - freelance", "mirakl - labs", url="https://y/2"
+    )
+
+    kept = _identity_deduplicate([first, second])
+
+    # later arrival wins, as with id/url duplicates
+    assert [item.listing_id for item in kept] == ["b"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_hard_drops_stated_mismatched_locations(database):
+    jobs = [
+        listing("1", "Berlin Python Dev", "LocalCo"),
+        listing("2", "Amsterdam Python Dev", "FarCo"),
+        listing("3", "Remote Python Dev", "AnywhereCo"),
+        listing("4", "Untagged Python Dev", "QuietCo"),
+    ]
+    from dataclasses import replace
+
+    jobs[0] = replace(jobs[0], location="Berlin, Germany")
+    jobs[1] = replace(jobs[1], location="Amsterdam")
+    jobs[2] = replace(jobs[2], location="Remote")
+    jobs[3] = replace(jobs[3], location=None)
+    scorer = FakeScorer({job.listing_id: ScoreResult(9, "r") for job in jobs})
+
+    result = await run_pipeline(
+        db=database,
+        sources=[FakeSource("fake", jobs)],
+        scorer=scorer,
+        profile="Python dev",
+        min_score=1,
+        location="Berlin",
+    )
+
+    judged = scorer.calls[0]
+    assert "1" in judged
+    assert "2" not in judged
+    assert "3" in judged
+    assert "4" in judged
+    assert result.stats["location_filtered"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_without_location_keeps_everything(database):
+    jobs = [
+        listing("1", "Job A", "Co", url="https://a/1"),
+        listing("2", "Job B", "Co", url="https://b/2"),
+    ]
+    from dataclasses import replace
+
+    jobs[0] = replace(jobs[0], location="Amsterdam")
+    jobs[1] = replace(jobs[1], location="Paris")
+    scorer = FakeScorer({job.listing_id: ScoreResult(9, "r") for job in jobs})
+
+    result = await run_pipeline(
+        db=database,
+        sources=[FakeSource("fake", jobs)],
+        scorer=scorer,
+        profile="Python dev",
+        min_score=1,
+        location="",
+    )
+
+    assert len(scorer.calls[0]) == 2
+    assert result.stats["location_filtered"] == 0

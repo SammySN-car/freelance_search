@@ -37,7 +37,7 @@ details each person puts in their own `.env`:
 | Setting | What it does |
 |---|---|
 | `PROFILE` | Free text: your skills, what you want, and `SKIP:` lines for what you never want. Embedded for ranking and shown to the judge. |
-| `LOCATION` | Your location. Added to every Google Jobs query (SerpApi's native `location` parameter) and tells the judge to down-rank roles that require being on-site somewhere else. Leave empty for worldwide/remote-only. |
+| `LOCATION` | Your location. Added to every Google Jobs query (SerpApi's native `location` parameter), and listings that state a *different* location are hard-dropped from the digest (jobs with no stated location or marked remote always pass). Leave empty for worldwide/remote-only. |
 | `EXPERIENCE_LEVEL` | e.g. `beginner`, `student`, `senior`. Used only when `GITHUB_URL` is empty. The judge scores opportunities that fit this level higher and roles demanding senior expertise lower. |
 | `GITHUB_URL` | Optional GitHub profile. The tool downloads your actual code and has the local model detect your level from it — no typed label. Re-checked every `GITHUB_REFRESH_DAYS` (default 2) and cached in the database; falls back to `EXPERIENCE_LEVEL` when empty or unreachable. |
 | `SERPAPI_QUERIES` | 3–8 JSON-quoted search strings. Mix freelance, internship, and job queries for your field. |

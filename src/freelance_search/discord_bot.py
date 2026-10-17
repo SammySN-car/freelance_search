@@ -155,6 +155,7 @@ class BotService:
                     min_score=self.settings.min_score,
                     serpapi_queries_used=len(self.settings.serpapi_queries),
                     embedder=self.embedder,
+                    location=self.settings.location,
                     max_to_score=self.settings.max_to_score,
                     digest_size=self.settings.digest_size,
                     score_model=self.settings.ollama_model,
