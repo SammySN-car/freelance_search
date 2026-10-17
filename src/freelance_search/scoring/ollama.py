@@ -17,7 +17,7 @@ class ScoringError(Exception):
 
 def build_prompt(listing: Listing, profile: str) -> str:
     return (
-        "Score this freelance listing against the profile below. Return exactly one JSON object "
+        "Score this job listing against the profile below. Return exactly one JSON object "
         'with this shape: {"score": <number 0-10>, "reason": "<one line>"}. '
         "The score must be a JSON number, not a string. Do not include markdown or extra keys.\n\n"
         f"PROFILE:\n{profile}\n\n"

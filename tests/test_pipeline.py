@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 
 from freelance_search.models import EmbeddingBatchResult, ScoreBatchResult, ScoreResult
-from freelance_search.pipeline import format_digest, run_pipeline
+from freelance_search.pipeline import clean_url, format_digest, run_pipeline
 
 
 class FakeSource:
@@ -58,68 +58,139 @@ class FakeEmbedder:
         }
 
 
-def listing(identifier, title="RAG Engineer", company="Acme", length=20):
+def listing(identifier, title="RAG Engineer", company="Acme", length=20, url=None):
     from freelance_search.models import Listing
 
     return Listing(
         listing_id=identifier,
         title=title,
         company=company,
-        url=f"https://jobs.test/{identifier}",
+        url=url or f"https://jobs.test/{identifier}",
         source="test",
         description="x" * length,
     )
 
 
-def test_embed_builder_masks_urls_truncates_names_and_sets_footer():
+def all_descriptions(embeds):
+    return "\n".join(embed.description for embed in embeds)
+
+
+GOOGLE_URL = (
+    "https://www.google.com/search?ibp=htl;jobs&q=RAG+engineer+freelance"
+    "&hl=en-US&shem=epsd1,esd2e&shndl=37&shmd=abc&shmds=v1&source=sh/x/job"
+    "&htidocid=q42CP6AGGoWV12uWAAAAAA%3D%3D#fpstate=tldetail&htiq=RAG"
+)
+
+
+def test_clean_url_strips_google_tracking_but_keeps_job_identity():
+    cleaned = clean_url(GOOGLE_URL)
+
+    assert "htidocid=q42CP6AGGoWV12uWAAAAAA%3D%3D" in cleaned
+    assert "ibp=htl;jobs" in cleaned
+    assert cleaned.startswith("https://www.google.com/search?")
+    for junk in ("shem=", "shndl=", "shmd=", "shmds=", "source=", "#fpstate", "hl="):
+        assert junk not in cleaned
+
+
+def test_clean_url_strips_generic_tracking_and_keeps_everything_else():
+    url = "https://jobs.test/7?utm_source=x&utm_medium=y&id=42&ref=board#apply"
+
+    cleaned = clean_url(url)
+
+    assert cleaned == "https://jobs.test/7?id=42#apply"
+
+
+def test_clean_url_leaves_plain_urls_untouched():
+    assert clean_url("https://jobs.test/plain") == "https://jobs.test/plain"
+
+
+def test_digest_lists_numbered_masked_links_without_reasons():
     jobs = [
-        (
-            listing(str(index), "Very long title " + ("x" * 300)),
-            ScoreResult(9 - index / 10, "Strong match"),
-        )
+        (listing(str(index), f"Job {index}", "Acme"), ScoreResult(9 - index / 10, "secret reason"))
         for index in range(5)
     ]
-    urls = [job.url for job, _ in jobs]
 
-    message, embed, shown_ids = format_digest(
+    message, embeds, shown_ids = format_digest(
         jobs,
         digest_date=date(2026, 10, 16),
         footer="sources 2 · fetched 5 · new 5 · judged 5",
     )
 
     assert message == ""
-    assert len(embed.fields) == 5
+    assert len(embeds) == 1
     assert shown_ids == tuple(str(index) for index in range(5))
-    assert all(len(field.name) <= 256 for field in embed.fields)
-    assert all(field.name.endswith("x" * 10) for field in embed.fields)
-    assert all(url in field.value for url, field in zip(urls, embed.fields, strict=True))
-    assert all("[Apply ->](" in field.value for field in embed.fields)
-    assert embed.footer.text.endswith(" · scored by local gemma3:4b")
+    description = embeds[0].description
+    assert description.count("\n") == 4
+    for index in range(5):
+        line = f"{index + 1}. [Job {index} · Acme](https://jobs.test/{index})"
+        assert line in description
+        assert "secret reason" not in description
+        assert "9/10" not in description
+    assert embeds[0].title.startswith("Opportunity shortlist - 2026-10-16")
+    assert embeds[0].footer.text.endswith(" · scored by local gemma3:4b")
 
 
-def test_embed_builder_drops_field_when_full_url_cannot_fit():
-    long_url = "https://jobs.test/" + ("x" * 1100)
-    job = listing("long")
-    job = type(job)(
-        job.listing_id,
-        job.title,
-        job.company,
-        long_url,
-        job.source,
-        job.description,
-        job.pay,
-        job.location,
-        job.published_at,
-    )
-    ranked = [(job, ScoreResult(9, "Strong match"))]
+def test_digest_respects_digest_size_cap():
+    jobs = [
+        (listing(str(index), f"Job {index}"), ScoreResult(10 - index / 10, "r"))
+        for index in range(30)
+    ]
 
-    _, embed, shown_ids = format_digest(
-        ranked,
+    _, embeds, shown_ids = format_digest(
+        jobs,
         digest_date=date(2026, 10, 16),
-        footer="sources 1 · fetched 1 · new 1 · judged 1",
+        footer="f",
+        digest_size=7,
     )
 
-    assert len(embed.fields) == 0
+    assert len(shown_ids) == 7
+    assert shown_ids == tuple(str(index) for index in range(7))
+    assert len(embeds[0].description.splitlines()) == 7
+
+
+def test_digest_uses_model_name_in_footer():
+    jobs = [(listing("1"), ScoreResult(9, "r"))]
+
+    _, embeds, _ = format_digest(
+        jobs,
+        digest_date=date(2026, 10, 16),
+        footer="f",
+        score_model="qwen3:4b",
+    )
+
+    assert embeds[0].footer.text.endswith(" · scored by local qwen3:4b")
+
+
+def test_digest_splits_long_lists_across_embeds():
+    jobs = [
+        (listing(str(index), "A" * 70, "B" * 30), ScoreResult(9, "r"))
+        for index in range(40)
+    ]
+
+    _, embeds, shown_ids = format_digest(
+        jobs,
+        digest_date=date(2026, 10, 16),
+        footer="f",
+        digest_size=40,
+    )
+
+    assert len(embeds) > 1
+    assert all(len(embed.description) <= 3900 for embed in embeds)
+    assert "(1/" in embeds[0].title and f"({len(embeds)}/{len(embeds)})" in embeds[-1].title
+    assert len(shown_ids) == 40
+
+
+def test_digest_drops_oversized_entries_without_truncating_urls():
+    long_url = "https://jobs.test/deep/" + ("x" * 5700)
+    jobs = [(listing("only", url=long_url), ScoreResult(9, "r"))]
+
+    _, embeds, shown_ids = format_digest(
+        jobs,
+        digest_date=date(2026, 10, 16),
+        footer="f",
+    )
+
+    assert embeds == []
     assert shown_ids == ()
 
 
@@ -154,14 +225,15 @@ async def test_pipeline_deduplicates_filters_sorts_caps_and_records_run(database
     )
 
     assert result.empty is False
-    assert result.shown_listing_ids == ("7", "1", "2", "4", "5")
+    assert result.shown_listing_ids == ("7", "1", "2", "4", "5", "6")
     with database.connect() as connection:
         duplicate = connection.execute(
             "SELECT title FROM listings WHERE listing_id = '2'"
         ).fetchone()
     assert duplicate["title"] == "Duplicate"
-    assert "source errors: 1" in result.embed.footer.text
-    assert "scoring errors: 1" in result.embed.footer.text
+    footer = result.embeds[-1].footer.text
+    assert "source errors: 1" in footer
+    assert "scoring errors: 1" in footer
     with database.connect() as connection:
         run = connection.execute("SELECT * FROM runs").fetchone()
     assert run["status"] == "completed"
@@ -197,24 +269,17 @@ async def test_already_shown_jobs_are_not_scored_or_returned(database):
 
 
 @pytest.mark.asyncio
-async def test_long_entries_drop_lowest_without_truncating_urls(database):
+async def test_long_urls_dropped_from_budget_never_truncated(database):
     jobs = []
-    for index in range(1, 6):
-        item = listing(str(index), f"Job {index}")
+    for index in range(1, 7):
         jobs.append(
-            type(item)(
-                item.listing_id,
-                item.title,
-                item.company,
-                f"https://jobs.test/{index}/" + ("x" * 1100),
-                item.source,
-                item.description,
-                item.pay,
-                item.location,
-                item.published_at,
+            listing(
+                str(index),
+                f"Job {index}",
+                url=f"https://jobs.test/{index}/" + ("x" * 1100),
             )
         )
-    scores = {str(index): ScoreResult(10 - index / 10, "Reason") for index in range(1, 6)}
+    scores = {str(index): ScoreResult(10 - index / 10, "Reason") for index in range(1, 7)}
 
     result = await run_pipeline(
         db=database,
@@ -225,7 +290,29 @@ async def test_long_entries_drop_lowest_without_truncating_urls(database):
         digest_date=date(2026, 10, 15),
     )
 
-    assert len(result.embed.fields) == 0
+    assert 0 < len(result.shown_listing_ids) < 6
+    description = all_descriptions(result.embeds)
+    for listing_id in result.shown_listing_ids:
+        url = f"https://jobs.test/{listing_id}/"
+        line = next(line for line in description.splitlines() if f"]({url}" in line)
+        assert line.endswith(f"]({url}{'x' * 1100})")
+
+
+@pytest.mark.asyncio
+async def test_budget_overflow_returns_text_message_not_empty_payload(database):
+    job = listing("deep", url="https://jobs.test/deep/" + ("x" * 5700))
+
+    result = await run_pipeline(
+        db=database,
+        sources=[FakeSource("test", [job])],
+        scorer=FakeScorer({"deep": ScoreResult(9, "r")}),
+        profile="profile",
+        min_score=0,
+    )
+
+    assert result.empty is True
+    assert result.embeds == []
+    assert "No links fit the size budget" in result.message
     assert result.shown_listing_ids == ()
 
 
@@ -290,12 +377,29 @@ async def test_retrieval_ranks_judging_and_judge_once(database):
         min_score=0,
     )
 
-    assert "https://jobs.test/31" not in first.message
+    assert "https://jobs.test/31" not in all_descriptions(first.embeds)
     assert len(embedder.calls[0]) == 31
     assert len(embedder.calls) == 1
     assert "31" not in scorer.calls[0]
     assert scorer.calls[1] == ["31"]
     assert second.stats["judged"] == 1
+
+
+@pytest.mark.asyncio
+async def test_digest_size_limit_applies_to_pipeline(database):
+    jobs = [listing(str(index), f"Job {index}") for index in range(1, 11)]
+    scores = {str(index): ScoreResult(10 - index / 10, "r") for index in range(1, 11)}
+
+    result = await run_pipeline(
+        db=database,
+        sources=[FakeSource("test", jobs)],
+        scorer=FakeScorer(scores),
+        profile="profile",
+        min_score=0,
+        digest_size=3,
+    )
+
+    assert result.shown_listing_ids == ("1", "2", "3")
 
 
 @pytest.mark.asyncio
@@ -333,4 +437,4 @@ async def test_embedding_failure_keeps_listing_for_next_run(database):
     )
 
     assert result.stats["embedded"] == 1
-    assert any("retry" in field.value for field in result.embed.fields)
+    assert "retry" in all_descriptions(result.embeds)

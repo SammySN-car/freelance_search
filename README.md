@@ -2,11 +2,16 @@
 
 [![CI](https://github.com/SammySN-car/freelance_search/actions/workflows/ci.yml/badge.svg)](https://github.com/SammySN-car/freelance_search/actions/workflows/ci.yml)
 
-`freelance_search` is a daily freelance scout for an AI/ML engineer: it
-searches SerpApi Google Jobs and free remote-job feeds, scores each new listing
-with a local Ollama Gemma model, and posts a ranked top-five shortlist to
-Discord each morning. A job is persisted as shown only after Discord confirms
-delivery, so the same job is never shown twice.
+`freelance_search` is a daily opportunity scout that anyone can point at
+their own career stage: it searches SerpApi Google Jobs and free remote-job
+feeds for freelance work, internships, and entry-level jobs, scores each new
+listing with a local Ollama Gemma model against **your** profile, and posts a
+ranked list of up to 25 links to Discord each morning. A job is persisted as
+shown only after Discord confirms delivery, so the same job is never shown
+twice.
+
+Everything it optimizes for comes from your own configuration — there is no
+hardcoded location or seniority bias in the code.
 
 ## Quickstart
 
@@ -19,9 +24,28 @@ python -m venv .venv
 python -m pip install -e ".[dev]"
 ollama pull gemma3:4b
 Copy-Item .env.example .env
-# Edit .env and fill in the Discord and SerpApi values.
+# Edit .env: Discord + SerpApi values, then your PROFILE,
+# LOCATION, and EXPERIENCE_LEVEL (see Customization below).
 python -m freelance_search
 ```
+
+## Customization
+
+The whole pipeline — search queries, ranking, and judging — runs from the
+details each person puts in their own `.env`:
+
+| Setting | What it does |
+|---|---|
+| `PROFILE` | Free text: your skills, what you want, and `SKIP:` lines for what you never want. Embedded for ranking and shown to the judge. |
+| `LOCATION` | Your location. Added to every Google Jobs query (SerpApi's native `location` parameter) and tells the judge to down-rank roles that require being on-site somewhere else. Leave empty for worldwide/remote-only. |
+| `EXPERIENCE_LEVEL` | e.g. `beginner`, `student`, `senior`. The judge scores opportunities that fit this level higher and roles demanding senior expertise lower. |
+| `SERPAPI_QUERIES` | 3–8 JSON-quoted search strings. Mix freelance, internship, and job queries for your field. |
+| `DIGEST_SIZE` | How many links appear per digest (1–40, default 25). |
+| `MAX_TO_SCORE` | How many highest-similarity listings reach the local judge per run (default 50). |
+| `MIN_SCORE` | Judge scores below this are excluded from the digest (0–10, default 5.0). |
+
+No keyword filtering is used anywhere: retrieval ranks everything by embedding
+similarity, and the local model judges the finalists against your profile.
 
 The default model is `gemma3:4b`. Set `OLLAMA_MODEL` in `.env` to use another
 locally installed model. The default timezone is `Asia/Kolkata` and the
@@ -63,17 +87,20 @@ fetch -> dedup -> retrieve (embeddings) -> rerank (local Gemma) -> digest -> del
                                                                             +-> mark shown only after Discord confirms send
 ```
 
-- **Fetch:** SerpApi Google Jobs is primary; RemoteOK, Jobicy, Arbeitnow, and
-  We Work Remotely RSS are no-key fallback adapters.
+- **Fetch:** SerpApi Google Jobs is primary (with your `LOCATION` on every
+  query); RemoteOK, Jobicy, Arbeitnow, and We Work Remotely RSS are no-key
+  fallback adapters.
 - **Dedup:** SQLite stores listings and permanently shown IDs/URLs.
 - **Retrieve:** Ollama embeddings compare the profile with each listing's title
   and description; cosine similarity is persisted without storing vectors.
-- **Rerank:** The highest-similarity candidates are judged by local Gemma,
-  which must return strict JSON with a numeric score from 0–10 and a one-line
-  reason. No listing is dropped by keyword matching.
+- **Rerank:** The highest-similarity candidates are judged by local Gemma
+  against your composed profile (profile + location + experience level), which
+  must return strict JSON with a numeric score from 0–10. No listing is dropped
+  by keyword matching.
 - **Digest:** Scores below `MIN_SCORE` are removed; results are sorted
-  deterministically and capped at five in a Discord embed with masked links,
-  keeping long tracking URLs out of the visible message.
+  deterministically and capped at `DIGEST_SIZE` (default 25). The digest is a
+  numbered list of masked links — titles are visible, long tracking URLs are
+  not — and splits across embeds when one would overflow.
 - **Deliver:** the prepared message is sent first; only a confirmed send marks
   its listing IDs as shown.
 
@@ -114,9 +141,10 @@ LLM calls are used by the application or CI.
 
 ## SerpApi quota
 
-The SerpApi free tier provides 250 searches per month. The default configuration
-uses approximately three queries per daily run (configurable between three and
-five), keeping the service within the monthly allowance.
+The SerpApi free tier provides 250 searches per month. The default
+configuration uses five queries per daily run (configurable between three and
+eight): 5 × 30 = 150 searches, keeping the service within the monthly
+allowance. Failed searches are not counted by SerpApi.
 
 ## Windows Task Scheduler
 
@@ -142,9 +170,10 @@ location.
 
 Set `EMBEDDING_MODEL` to the Ollama embedding model you want to use
 (default: `mxbai-embed-large`). `MAX_TO_SCORE` controls how many
-highest-similarity listings reach the slower Gemma judge (default: `30`).
-Embedding and judge results are persisted, so a listing is embedded and judged
-at most once per lifetime unless its database is removed.
+highest-similarity listings reach the slower Gemma judge (default: `50`), and
+`DIGEST_SIZE` controls how many judged listings appear as links in the digest
+(default: `25`). Embedding and judge results are persisted, so a listing is
+embedded and judged at most once per lifetime unless its database is removed.
 
 ## Scope
 

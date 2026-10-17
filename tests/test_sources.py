@@ -10,6 +10,19 @@ from freelance_search.sources.weworkremotely import WWR_RSS_URL, WeWorkRemotelyS
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("location", ["", "   "])
+@respx.mock
+async def test_serpapi_without_location_sends_no_location_param(location):
+    respx.get(SERPAPI_URL).mock(return_value=httpx.Response(200, json={"jobs_results": []}))
+
+    async with httpx.AsyncClient() as client:
+        await SerpApiSource("key", ["one", "two"], location).fetch(client)
+
+    for call in respx.calls:
+        assert "location" not in httpx.URL(str(call.request.url)).params
+
+
+@pytest.mark.asyncio
 @respx.mock
 async def test_serpapi_normalizes_jobs():
     respx.get(SERPAPI_URL).mock(
@@ -41,6 +54,19 @@ async def test_serpapi_normalizes_jobs():
     assert listings[0].listing_id == "serpapi:abc"
     assert listings[0].title == "RAG Engineer"
     assert listings[0].pay == "$50/hr"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_serpapi_passes_location_to_every_query():
+    respx.get(SERPAPI_URL).mock(return_value=httpx.Response(200, json={"jobs_results": []}))
+
+    async with httpx.AsyncClient() as client:
+        await SerpApiSource("key", ["one", "two"], "Berlin, Germany").fetch(client)
+
+    assert len(respx.calls) == 2
+    for call in respx.calls:
+        assert httpx.URL(str(call.request.url)).params.get("location") == "Berlin, Germany"
 
 
 @pytest.mark.asyncio
@@ -85,6 +111,7 @@ async def test_serpapi_normalizes_jobs():
         ),
     ],
 )
+@pytest.mark.asyncio
 @respx.mock
 async def test_json_sources_normalize_listings(source, url, payload, expected_id):
     respx.get(url).mock(return_value=httpx.Response(200, json=payload))

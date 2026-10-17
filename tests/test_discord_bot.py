@@ -17,13 +17,15 @@ from freelance_search.models import Listing, OllamaHealth, ScoreBatchResult
 from freelance_search.pipeline import PreparedDigest
 
 
-def make_settings():
-    return Settings(
-        discord_token="token",
-        discord_owner_id=123,
-        discord_channel_id=456,
-        serpapi_api_key="key",
-    )
+def make_settings(**overrides):
+    base = {
+        "discord_token": "token",
+        "discord_owner_id": 123,
+        "discord_channel_id": 456,
+        "serpapi_api_key": "key",
+    }
+    base.update(overrides)
+    return Settings(_env_file=None, **base)
 
 
 class Source:
@@ -44,15 +46,16 @@ class Scorer:
         return self.last_health
 
 
-def prepared(run_id=1, ids=("job-1",), empty=False):
+def prepared(run_id=1, ids=("job-1",), empty=False, embeds=None):
     return PreparedDigest(
-        "Freelance shortlist - 2026-10-15\n\nmessage",
+        "Opportunity shortlist - 2026-10-15\n\nmessage",
         ids,
         empty=empty,
         stats={"sources": 1, "fetched": 1, "new": 1, "deduped": 0, "scored": 1},
         source_errors={},
         scoring_errors={},
         run_id=run_id,
+        embeds=embeds or [],
     )
 
 
@@ -74,7 +77,7 @@ async def test_successful_delivery_marks_only_after_send(database):
         ]
     )
 
-    await channel.send(result.message, embed=result.embed)
+    await channel.send(result.message or None, embeds=result.embeds or None)
     service.deliver(result)
 
     assert database.unshown_listing_ids(["job-1"]) == set()
@@ -121,11 +124,50 @@ async def test_refresh_success_sends_public_digest_and_short_ack(database):
 
     await command.callback(Interaction())
 
-    channel.send.assert_awaited_once_with(result.message, embed=result.embed)
+    channel.send.assert_awaited_once_with(result.message or None, embeds=result.embeds or None)
     Interaction.followup.send.assert_awaited_once_with(
-        "Digest posted · judged 30 · new 12",
+        "Digest posted · links 0 · judged 30 · new 12",
         ephemeral=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_refresh_posts_multiple_embeds_then_marks_shown(database):
+    import discord
+
+    bot = create_bot(make_settings(), database)
+    database.save_listings(
+        [
+            Listing("a", "Job A", "Acme", "https://jobs.test/a", "test"),
+            Listing("b", "Job B", "Beta", "https://jobs.test/b", "test"),
+        ]
+    )
+    embeds = [
+        discord.Embed(
+            title="Opportunity shortlist - 2026-10-16",
+            description="1. [Job A \u00b7 Acme](https://jobs.test/a)",
+        ),
+        discord.Embed(
+            title="Opportunity shortlist - 2026-10-16 (2/2)",
+            description="2. [Job B \u00b7 Beta](https://jobs.test/b)",
+        ),
+    ]
+    result = prepared(ids=("a", "b"), embeds=embeds)
+    result.message = ""  # real link digests carry content in embeds only
+    bot.service.run = AsyncMock(return_value=result)
+    channel = AsyncMock()
+    bot.get_channel = lambda channel_id: channel
+    command = bot.tree.get_command("refresh")
+
+    class Interaction:
+        user = type("User", (), {"id": 123})()
+        response = AsyncMock()
+        followup = AsyncMock()
+
+    await command.callback(Interaction())
+
+    channel.send.assert_awaited_once_with(None, embeds=embeds)
+    assert database.unshown_listing_ids(["a", "b"]) == set()
 
 
 def test_startup_channel_check_reports_missing_channel():
@@ -154,11 +196,11 @@ async def test_refresh_command_rejects_non_owner(database):
     Interaction.response.send_message.assert_awaited_once_with("Owner only.", ephemeral=True)
 
 
-def test_refresh_ack_is_short_and_contains_run_counts():
+def test_refresh_ack_contains_links_judged_and_new():
     result = prepared()
     result.stats.update({"judged": 30, "new": 12})
 
-    assert refresh_ack(result) == "Digest posted · judged 30 · new 12"
+    assert refresh_ack(result) == "Digest posted · links 1 · judged 30 · new 12"
 
 
 @pytest.mark.asyncio
@@ -240,3 +282,62 @@ async def test_status_contains_run_counts_query_count_and_ollama_health(database
 
     service.set_discord_channel(type("Channel", (), {"name": "jobs"})())
     assert "Discord channel: OK (#jobs)" in service.status_message("running")
+
+
+def test_status_shows_customization_line(database):
+    service = BotService(
+        make_settings(location="India", experience_level="beginner", digest_size=30),
+        database,
+        [Source()],
+        Scorer(),
+    )
+    database.initialize()
+
+    message = service.status_message("stopped")
+
+    expected = "Customization: level beginner · location India · 30 links/run · top 50 judged"
+    assert expected in message
+
+
+def test_status_marks_unset_customization(database):
+    service = BotService(make_settings(), database, [Source()], Scorer())
+    database.initialize()
+
+    message = service.status_message("stopped")
+
+    assert "Customization: level unset · location unset · 25 links/run · top 50 judged" in message
+
+
+@pytest.mark.asyncio
+async def test_bot_service_passes_composed_profile_and_digest_size(database):
+    service = BotService(
+        make_settings(
+            profile="Python dev.",
+            location="India",
+            experience_level="beginner",
+            digest_size=12,
+        ),
+        database,
+        [Source()],
+        Scorer(),
+    )
+    database.initialize()
+    captured = {}
+
+    async def fake_pipeline(**kwargs):
+        captured.update(kwargs)
+        return prepared()
+
+    import freelance_search.discord_bot as discord_bot
+
+    original = discord_bot.run_pipeline
+    discord_bot.run_pipeline = fake_pipeline
+    try:
+        await service.run()
+    finally:
+        discord_bot.run_pipeline = original
+
+    assert captured["profile"].startswith("Python dev.")
+    assert "Candidate location: India" in captured["profile"]
+    assert "Candidate experience level: beginner" in captured["profile"]
+    assert captured["digest_size"] == 12

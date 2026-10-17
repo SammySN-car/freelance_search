@@ -1,5 +1,6 @@
 from collections.abc import Iterable, Sequence
 from datetime import date, datetime
+from urllib.parse import urlsplit, urlunsplit
 
 import discord
 import httpx
@@ -7,9 +8,23 @@ import httpx
 from .db import Database
 from .models import EmbeddingBatchResult, Listing, ScoreBatchResult, ScoreResult
 
-MAX_DIGEST_ENTRIES = 5
-EMBED_FIELD_NAME_LIMIT = 256
-EMBED_FIELD_VALUE_LIMIT = 1024
+EMBED_DESCRIPTION_LIMIT = 3900
+EMBED_TOTAL_BUDGET = 5600
+TITLE_LENGTH_LIMIT = 80
+
+GOOGLE_JOBS_PARAMS = {"ibp", "q", "htidocid"}
+TRACKING_PARAMS = {
+    "gclid",
+    "fbclid",
+    "igshid",
+    "mc_cid",
+    "mc_eid",
+    "ref",
+    "ref_",
+    "se",
+    "source",
+    "spm",
+}
 
 
 class PipelineSource:
@@ -46,7 +61,7 @@ class PreparedDigest:
         scoring_errors: dict[str, str],
         run_id: int,
         embedding_errors: dict[str, str] | None = None,
-        embed: discord.Embed | None = None,
+        embeds: Sequence[discord.Embed] = (),
     ) -> None:
         self.message = message
         self.shown_listing_ids = shown_listing_ids
@@ -55,7 +70,7 @@ class PreparedDigest:
         self.source_errors = source_errors
         self.scoring_errors = scoring_errors
         self.embedding_errors = embedding_errors or {}
-        self.embed = embed
+        self.embeds = list(embeds)
         self.run_id = run_id
 
 
@@ -79,31 +94,85 @@ def _identity_deduplicate(listings: Iterable[Listing]) -> list[Listing]:
     return list(selected.values())
 
 
+def clean_url(url: str) -> str:
+    """Strip tracking parameters and fragments so links stay short and stable."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.query:
+        return url
+    host = parts.netloc.lower()
+    is_google_jobs = (
+        host.endswith("google.com") and parts.path == "/search" and "htidocid" in parts.query
+    )
+    kept = []
+    for pair in parts.query.split("&"):
+        key = pair.partition("=")[0].lower()
+        if is_google_jobs:
+            if key in GOOGLE_JOBS_PARAMS:
+                kept.append(pair)
+        elif key in TRACKING_PARAMS or key.startswith("utm_"):
+            continue
+        else:
+            kept.append(pair)
+    fragment = "" if is_google_jobs or parts.fragment.startswith("fpstate") else parts.fragment
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "&".join(kept), fragment))
+
+
+def _digest_line(rank: int, listing: Listing) -> str:
+    title = " ".join(listing.title.split())[:TITLE_LENGTH_LIMIT]
+    title = title.replace("[", "(").replace("]", ")")
+    company = " ".join(listing.company.split()).replace("[", "(").replace("]", ")")
+    return f"{rank}. [{title} · {company}]({clean_url(listing.url)})"
+
+
 def format_digest(
     ranked: Sequence[tuple[Listing, ScoreResult]],
     *,
     digest_date: date,
     footer: str,
+    digest_size: int = 25,
     score_model: str = "gemma3:4b",
-) -> tuple[str, discord.Embed, tuple[str, ...]]:
-    embed = discord.Embed(title=f"Freelance shortlist - {digest_date.isoformat()}")
-    selected: list[tuple[Listing, ScoreResult, str, str]] = []
-    for listing, score in ranked[:MAX_DIGEST_ENTRIES]:
-        prefix = f"{score.score:g}/10 · {listing.company} · "
-        title_limit = max(0, EMBED_FIELD_NAME_LIMIT - len(prefix))
-        name = f"{prefix[:EMBED_FIELD_NAME_LIMIT]}{listing.title[:title_limit]}"
-        value = f"{score.reason}\n[Apply ->]({listing.url})"
-        selected.append((listing, score, name, value))
-    while selected and any(len(value) > EMBED_FIELD_VALUE_LIMIT for *_, value in selected):
-        selected.pop()
-    for _listing, _, name, value in selected:
-        embed.add_field(
-            name=name,
-            value=value,
-            inline=False,
-        )
-    embed.set_footer(text=f"{footer} · scored by local {score_model}")
-    return "", embed, tuple(listing.listing_id for listing, _, _, _ in selected)
+) -> tuple[str, list[discord.Embed], tuple[str, ...]]:
+    """Build a links-only digest: numbered masked links, best-scoring first."""
+    lines: list[str] = []
+    shown_ids: list[str] = []
+    used = 0
+    for rank, (listing, _score) in enumerate(ranked, start=1):
+        if len(lines) >= digest_size:
+            break
+        line = _digest_line(rank, listing)
+        if len(line) > EMBED_DESCRIPTION_LIMIT or used + len(line) + 1 > EMBED_TOTAL_BUDGET:
+            break
+        lines.append(line)
+        shown_ids.append(listing.listing_id)
+        used += len(line) + 1
+
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_length = 0
+    for line in lines:
+        if current and current_length + len(line) + 1 > EMBED_DESCRIPTION_LIMIT:
+            chunks.append(current)
+            current = []
+            current_length = 0
+        current.append(line)
+        current_length += len(line) + 1
+    if current:
+        chunks.append(current)
+
+    embeds: list[discord.Embed] = []
+    total = len(chunks)
+    for index, chunk in enumerate(chunks, start=1):
+        title = f"Opportunity shortlist - {digest_date.isoformat()}"
+        if total > 1:
+            title += f" ({index}/{total})"
+        embed = discord.Embed(title=title, description="\n".join(chunk))
+        if index == total:
+            embed.set_footer(text=f"{footer} · scored by local {score_model}")
+        embeds.append(embed)
+    return "", embeds, tuple(shown_ids)
 
 
 async def run_pipeline(
@@ -117,7 +186,8 @@ async def run_pipeline(
     client: httpx.AsyncClient | None = None,
     serpapi_queries_used: int = 0,
     embedder: PipelineEmbedder | None = None,
-    max_to_score: int = 30,
+    max_to_score: int = 50,
+    digest_size: int = 25,
     score_model: str = "gemma3:4b",
 ) -> PreparedDigest:
     run_id = db.start_run()
@@ -211,20 +281,29 @@ async def run_pipeline(
         if embedding_errors:
             footer += f" · embedding errors: {len(embedding_errors)}"
         if ranked:
-            message, embed, shown_ids = format_digest(
+            message, embeds, shown_ids = format_digest(
                 ranked,
                 digest_date=date_value,
                 footer=footer,
+                digest_size=digest_size,
                 score_model=score_model,
             )
-            empty = False
+            if shown_ids:
+                empty = False
+            else:
+                message = (
+                    f"Opportunity shortlist - {date_value.isoformat()}\n\n"
+                    f"No links fit the size budget this run.\n\n{footer}"
+                )
+                embeds = []
+                empty = True
         else:
             message = (
-                f"Freelance shortlist - {date_value.isoformat()}\n\n"
+                f"Opportunity shortlist - {date_value.isoformat()}\n\n"
                 f"No new matching jobs.\n\n{footer}"
             )
             shown_ids = ()
-            embed = None
+            embeds = []
             empty = True
         db.finish_run(
             run_id,
@@ -258,7 +337,7 @@ async def run_pipeline(
             scoring_errors=batch.errors,
             run_id=run_id,
             embedding_errors=embedding_errors,
-            embed=embed,
+            embeds=embeds,
         )
     finally:
         if own_client:

@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands, tasks
 
-from .config import Settings
+from .config import Settings, compose_profile
 from .db import Database
 from .pipeline import PreparedDigest, run_pipeline
 from .retriever import OllamaEmbedder
@@ -53,7 +53,8 @@ def inspect_discord_channel(bot: commands.Bot, channel_id: int) -> object | None
 
 def refresh_ack(result: PreparedDigest) -> str:
     return (
-        f"Digest posted · judged {result.stats.get('judged', 0)} · "
+        f"Digest posted · links {len(result.shown_listing_ids)} · "
+        f"judged {result.stats.get('judged', 0)} · "
         f"new {result.stats.get('new', 0)}"
     )
 
@@ -101,11 +102,12 @@ class BotService:
                     db=self.database,
                     sources=self.sources,
                     scorer=self.scorer,
-                    profile=self.settings.profile,
+                    profile=compose_profile(self.settings),
                     min_score=self.settings.min_score,
                     serpapi_queries_used=len(self.settings.serpapi_queries),
                     embedder=self.embedder,
                     max_to_score=self.settings.max_to_score,
+                    digest_size=self.settings.digest_size,
                     score_model=self.settings.ollama_model,
                 )
                 self.last_error = None
@@ -156,12 +158,21 @@ class BotService:
                 "Discord channel: NOT FOUND — fix DISCORD_CHANNEL_ID "
                 "(see startup log)"
             )
-        return f"{run_summary}\n{health_summary}\n{channel_summary}\nScheduler: {scheduler_state}"
+        customization = (
+            f"Customization: level {self.settings.experience_level or 'unset'} · "
+            f"location {self.settings.location or 'unset'} · "
+            f"{self.settings.digest_size} links/run · top "
+            f"{self.settings.max_to_score} judged"
+        )
+        return (
+            f"{run_summary}\n{health_summary}\n{channel_summary}\n"
+            f"{customization}\nScheduler: {scheduler_state}"
+        )
 
 
 def build_sources(settings: Settings) -> list:
     return [
-        SerpApiSource(settings.serpapi_api_key, settings.serpapi_queries),
+        SerpApiSource(settings.serpapi_api_key, settings.serpapi_queries, settings.location),
         RemoteOKSource(),
         JobicySource(),
         ArbeitnowSource(),
@@ -190,7 +201,10 @@ def create_bot(settings: Settings, database: Database | None = None) -> commands
     def owner_only(interaction: discord.Interaction) -> bool:
         return is_owner(interaction.user.id, settings.discord_owner_id)
 
-    @bot.tree.command(name="refresh", description="Run the freelance job search now")
+    async def post_digest(channel: object, result: PreparedDigest) -> None:
+        await channel.send(result.message or None, embeds=result.embeds or None)
+
+    @bot.tree.command(name="refresh", description="Run the opportunity search now")
     async def refresh(interaction: discord.Interaction) -> None:
         if not owner_only(interaction):
             await interaction.response.send_message("Owner only.", ephemeral=True)
@@ -211,7 +225,7 @@ def create_bot(settings: Settings, database: Database | None = None) -> commands
             channel = inspect_discord_channel(bot, settings.discord_channel_id)
             if channel is None:
                 raise RuntimeError("Configured Discord channel was not found")
-            await channel.send(result.message, embed=result.embed)
+            await post_digest(channel, result)
         except Exception as exc:
             service.delivery_failed(result, exc)
             await interaction.followup.send(
@@ -222,7 +236,7 @@ def create_bot(settings: Settings, database: Database | None = None) -> commands
         service.deliver(result)
         await interaction.followup.send(refresh_ack(result), ephemeral=True)
 
-    @bot.tree.command(name="status", description="Show freelance search status")
+    @bot.tree.command(name="status", description="Show opportunity search status")
     async def status(interaction: discord.Interaction) -> None:
         if not owner_only(interaction):
             await interaction.response.send_message("Owner only.", ephemeral=True)
@@ -242,7 +256,7 @@ def create_bot(settings: Settings, database: Database | None = None) -> commands
             channel = inspect_discord_channel(bot, settings.discord_channel_id)
             if channel is None:
                 raise RuntimeError("Configured Discord channel was not found")
-            await channel.send(result.message, embed=result.embed)
+            await post_digest(channel, result)
             service.deliver(result)
         except Exception as exc:
             service.last_error = f"Scheduled run failed: {exc}"

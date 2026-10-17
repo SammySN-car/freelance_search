@@ -9,17 +9,18 @@ SERPAPI_URL = "https://serpapi.com/search.json"
 class SerpApiSource:
     name = "serpapi"
 
-    def __init__(self, api_key: str, queries: list[str]) -> None:
+    def __init__(self, api_key: str, queries: list[str], location: str = "") -> None:
         self.api_key = api_key
         self.queries = queries
+        self.location = location.strip()
 
     async def fetch(self, client: httpx.AsyncClient) -> list[Listing]:
         listings: list[Listing] = []
         for query in self.queries:
-            response = await client.get(
-                SERPAPI_URL,
-                params={"engine": "google_jobs", "q": query, "api_key": self.api_key},
-            )
+            params = {"engine": "google_jobs", "q": query, "api_key": self.api_key}
+            if self.location:
+                params["location"] = self.location
+            response = await client.get(SERPAPI_URL, params=params)
             require_success(response)
             payload = response.json()
             for job in payload.get("jobs_results", []):

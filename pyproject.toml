@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "freelance-search"
 version = "0.1.0"
-description = "A local daily freelance-job shortlist delivered to Discord."
+description = "A local daily job/internship/freelance link list for Discord, scored against your own profile."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
