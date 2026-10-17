@@ -93,3 +93,30 @@ def test_github_verdict_round_trip(database):
     database.save_github_verdict(replacement)
 
     assert database.get_github_verdict() == replacement
+
+
+def test_save_listings_heals_stale_url_without_touching_scores(database):
+    from dataclasses import replace
+
+    from freelance_search.models import ScoreResult
+
+    old = Listing(
+        listing_id="serpapi:abc",
+        title="RAG Engineer",
+        company="Acme",
+        url="https://www.google.com/search?ibp=htl;jobs&htidocid=dead",
+        source="serpapi",
+    )
+    database.save_listings([old])
+    database.update_scores({"serpapi:abc": ScoreResult(8.5, "solid")})
+
+    healed = replace(old, url="https://origin.test/posting/1")
+    assert database.save_listings([healed]) == 1
+
+    row = database.listing_records(["serpapi:abc"])["serpapi:abc"]
+    assert row["url"] == "https://origin.test/posting/1"
+    assert row["score"] == 8.5
+    assert row["score_reason"] == "solid"
+
+    # same url again: no change counted, matching old INSERT OR IGNORE behavior
+    assert database.save_listings([healed]) == 0

@@ -139,9 +139,11 @@ class Database:
             before = connection.total_changes
             connection.executemany(
                 """
-                INSERT OR IGNORE INTO listings
+                INSERT INTO listings
                 (listing_id, title, company, url, source, description, pay, location, published_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(listing_id) DO UPDATE SET url = excluded.url
+                WHERE listings.url <> excluded.url
                 """,
                 rows,
             )

@@ -144,3 +144,61 @@ async def test_we_work_remotely_normalizes_rss():
 
     assert listings[0].listing_id == "weworkremotely:https://job.test/rss"
     assert listings[0].company == "Delta"
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_serpapi_prefers_stable_source_link_over_share_link():
+    respx.get(SERPAPI_URL).mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "jobs_results": [
+                        {
+                            "job_id": "abc",
+                            "title": "RAG Engineer",
+                            "company_name": "Acme",
+                            "source_link": "https://origin.test/posting/1",
+                            "share_link": "https://www.google.com/search?ibp=htl;jobs&htidocid=zzz",
+                        }
+                    ]
+                },
+            ),
+            httpx.Response(200, json={"jobs_results": []}),
+            httpx.Response(200, json={"jobs_results": []}),
+        ]
+    )
+
+    async with httpx.AsyncClient() as client:
+        listings = await SerpApiSource("key", ["one", "two", "three"]).fetch(client)
+
+    assert listings[0].url == "https://origin.test/posting/1"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_serpapi_falls_back_to_share_link_without_source_link():
+    respx.get(SERPAPI_URL).mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "jobs_results": [
+                        {
+                            "job_id": "abc",
+                            "title": "RAG Engineer",
+                            "company_name": "Acme",
+                            "share_link": "https://www.google.com/search?ibp=htl;jobs&htidocid=zzz",
+                        }
+                    ]
+                },
+            ),
+            httpx.Response(200, json={"jobs_results": []}),
+            httpx.Response(200, json={"jobs_results": []}),
+        ]
+    )
+
+    async with httpx.AsyncClient() as client:
+        listings = await SerpApiSource("key", ["one", "two", "three"]).fetch(client)
+
+    assert "htidocid=zzz" in listings[0].url

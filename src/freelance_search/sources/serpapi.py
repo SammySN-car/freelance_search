@@ -24,7 +24,9 @@ class SerpApiSource:
             require_success(response)
             payload = response.json()
             for job in payload.get("jobs_results", []):
-                url = job.get("share_link") or job.get("link")
+                # source_link is the origin posting and stays valid;
+                # share_link is Google's session URL (htidocid) and rots in days
+                url = job.get("source_link") or job.get("share_link")
                 if not url:
                     continue
                 job_id = job.get("job_id") or url
